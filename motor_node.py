@@ -1,7 +1,17 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-import RPi.GPIO as GPIO
+try:
+    import RPi.GPIO as GPIO
+    GPIO_AVAILABLE = True
+except ImportError:
+    GPIO_AVAILABLE = False
+
+if GPIO_AVAILABLE:
+    GPIO.setmode(GPIO.BCM)
+    # реальные GPIO команды
+else:
+    self.get_logger().warn("RPi.GPIO not available — running in simulation mode")
 
 # ===== GPIO CONFIG =====
 # Left motor
