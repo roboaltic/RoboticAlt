@@ -6,7 +6,6 @@ def generate_launch_description():
         Node(
             package='diff_drive_l298n',
             executable='diff_drive_node',
-            name='diff_drive_l298n',
-            output='screen',
+            output='screen'
         )
     ])
