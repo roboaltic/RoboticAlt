@@ -2,7 +2,6 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 
-# ===== SAFE GPIO IMPORT =====
 GPIO_AVAILABLE = False
 GPIO = None
 
@@ -12,18 +11,11 @@ except ImportError:
     pass
 
 
-  def __init__(self):
-        super().__init__('diff_drive_node')
 class DiffDriveL298N(Node):
-
-  
-        self.in1 = 17
-       class DiffDriveL298N(Node):
 
     def __init__(self):
         super().__init__('diff_drive_l298n')
 
-        # ===== PARAMETERS =====
         self.declare_parameter('max_linear_speed', 0.3)
         self.declare_parameter('max_angular_speed', 1.2)
 
@@ -32,7 +24,6 @@ class DiffDriveL298N(Node):
         self.max_angular = self.get_parameter(
             'max_angular_speed').value
 
-        # ===== GPIO PINS =====
         self.in1 = 17
         self.in2 = 27
         self.in3 = 26
@@ -40,7 +31,6 @@ class DiffDriveL298N(Node):
         self.en_a = 22
         self.en_b = 13
 
-        # ===== GPIO INIT =====
         global GPIO_AVAILABLE
         if GPIO is not None:
             try:
@@ -64,14 +54,13 @@ class DiffDriveL298N(Node):
 
             except RuntimeError:
                 self.get_logger().warn(
-                    "GPIO detected but no SoC access (software-only mode)"
+                    "GPIO detected but no SoC access"
                 )
         else:
             self.get_logger().warn(
-                "RPi.GPIO not available (software-only mode)"
+                "RPi.GPIO not available"
             )
 
-        # ===== ROS SUB =====
         self.create_subscription(
             Twist,
             '/cmd_vel',
@@ -79,16 +68,12 @@ class DiffDriveL298N(Node):
             10
         )
 
-        # ===== WATCHDOG =====
         self.last_cmd_time = self.get_clock().now()
         self.create_timer(0.1, self.watchdog_check)
 
-
-    # ===== CALLBACK =====
     def cmd_vel_callback(self, msg: Twist):
         self.last_cmd_time = self.get_clock().now()
 
-        # --- LIMITS ---
         linear = max(
             -self.max_linear,
             min(self.max_linear, msg.linear.x)
@@ -98,7 +83,6 @@ class DiffDriveL298N(Node):
             min(self.max_angular, msg.angular.z)
         )
 
-        # --- DIFF DRIVE ---
         left = linear - angular
         right = linear + angular
 
@@ -108,11 +92,8 @@ class DiffDriveL298N(Node):
         if not GPIO_AVAILABLE:
             return
 
-        # LEFT MOTOR
         GPIO.output(self.in1, left >= 0)
         GPIO.output(self.in2, left < 0)
-
-        # RIGHT MOTOR
         GPIO.output(self.in3, right >= 0)
         GPIO.output(self.in4, right < 0)
 
@@ -127,8 +108,10 @@ class DiffDriveL298N(Node):
             self.pwm_left.ChangeDutyCycle(0)
             self.pwm_right.ChangeDutyCycle(0)
 
+
 def main():
     rclpy.init()
     node = DiffDriveL298N()
     rclpy.spin(node)
     rclpy.shutdown()
+
