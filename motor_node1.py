@@ -1,14 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-
-GPIO_AVAILABLE = False
-GPIO = None
-
-try:
-    import RPi.GPIO as GPIO
-except ImportError:
-    pass
+import RPi.GPIO as GPIO
 
 
 class DiffDriveL298N(Node):
@@ -16,51 +9,50 @@ class DiffDriveL298N(Node):
     def __init__(self):
         super().__init__('diff_drive_l298n')
 
+        # ===== PARAMETERS =====
         self.declare_parameter('max_linear_speed', 0.3)
         self.declare_parameter('max_angular_speed', 1.2)
+        self.declare_parameter('pwm_frequency', 1000)
 
         self.max_linear = self.get_parameter(
             'max_linear_speed').value
         self.max_angular = self.get_parameter(
             'max_angular_speed').value
+        self.pwm_freq = self.get_parameter(
+            'pwm_frequency').value
 
-        self.in1 = 17
+        # ===== GPIO PINS (BCM) =====
+        # L298N
+        self.in1 = 17   # Motor A
         self.in2 = 27
-        self.in3 = 26
+        self.in3 = 26   # Motor B
         self.in4 = 19
-        self.en_a = 22
-        self.en_b = 13
 
-        global GPIO_AVAILABLE
-        if GPIO is not None:
-            try:
-                GPIO.setmode(GPIO.BCM)
+        self.en_a = 22  # PWM Motor A
+        self.en_b = 13  # PWM Motor B
 
-                GPIO.setup(self.in1, GPIO.OUT)
-                GPIO.setup(self.in2, GPIO.OUT)
-                GPIO.setup(self.in3, GPIO.OUT)
-                GPIO.setup(self.in4, GPIO.OUT)
-                GPIO.setup(self.en_a, GPIO.OUT)
-                GPIO.setup(self.en_b, GPIO.OUT)
+        # ===== GPIO INIT =====
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
 
-                self.pwm_left = GPIO.PWM(self.en_a, 1000)
-                self.pwm_right = GPIO.PWM(self.en_b, 1000)
+        GPIO.setup(self.in1, GPIO.OUT)
+        GPIO.setup(self.in2, GPIO.OUT)
+        GPIO.setup(self.in3, GPIO.OUT)
+        GPIO.setup(self.in4, GPIO.OUT)
+        GPIO.setup(self.en_a, GPIO.OUT)
+        GPIO.setup(self.en_b, GPIO.OUT)
 
-                self.pwm_left.start(0)
-                self.pwm_right.start(0)
+        self.pwm_left = GPIO.PWM(self.en_a, self.pwm_freq)
+        self.pwm_right = GPIO.PWM(self.en_b, self.pwm_freq)
 
-                GPIO_AVAILABLE = True
-                self.get_logger().info("GPIO initialized")
+        self.pwm_left.start(0)
+        self.pwm_right.start(0)
 
-            except RuntimeError:
-                self.get_logger().warn(
-                    "GPIO detected but no SoC access"
-                )
-        else:
-            self.get_logger().warn(
-                "RPi.GPIO not available"
-            )
+        self.stop_motors()
 
+        self.get_logger().info("L298N motor driver initialized")
+
+        # ===== ROS SUB =====
         self.create_subscription(
             Twist,
             '/cmd_vel',
@@ -68,12 +60,16 @@ class DiffDriveL298N(Node):
             10
         )
 
+        # ===== WATCHDOG =====
         self.last_cmd_time = self.get_clock().now()
         self.create_timer(0.1, self.watchdog_check)
+
+    # ======================================================
 
     def cmd_vel_callback(self, msg: Twist):
         self.last_cmd_time = self.get_clock().now()
 
+        # --- LIMIT INPUT ---
         linear = max(
             -self.max_linear,
             min(self.max_linear, msg.linear.x)
@@ -83,35 +79,62 @@ class DiffDriveL298N(Node):
             min(self.max_angular, msg.angular.z)
         )
 
+        # --- DIFF DRIVE ---
         left = linear - angular
         right = linear + angular
 
-        left_pwm = min(abs(left) * 100, 100)
-        right_pwm = min(abs(right) * 100, 100)
+        left_pwm = min(abs(left) / self.max_linear * 100, 100)
+        right_pwm = min(abs(right) / self.max_linear * 100, 100)
 
-        if not GPIO_AVAILABLE:
-            return
+        # --- LEFT MOTOR ---
+        if left >= 0:
+            GPIO.output(self.in1, GPIO.HIGH)
+            GPIO.output(self.in2, GPIO.LOW)
+        else:
+            GPIO.output(self.in1, GPIO.LOW)
+            GPIO.output(self.in2, GPIO.HIGH)
 
-        GPIO.output(self.in1, left >= 0)
-        GPIO.output(self.in2, left < 0)
-        GPIO.output(self.in3, right >= 0)
-        GPIO.output(self.in4, right < 0)
+        # --- RIGHT MOTOR ---
+        if right >= 0:
+            GPIO.output(self.in3, GPIO.HIGH)
+            GPIO.output(self.in4, GPIO.LOW)
+        else:
+            GPIO.output(self.in3, GPIO.LOW)
+            GPIO.output(self.in4, GPIO.HIGH)
 
         self.pwm_left.ChangeDutyCycle(left_pwm)
         self.pwm_right.ChangeDutyCycle(right_pwm)
+
+    # ======================================================
 
     def watchdog_check(self):
         dt = (self.get_clock().now() -
               self.last_cmd_time).nanoseconds / 1e9
 
-        if dt > 0.5 and GPIO_AVAILABLE:
-            self.pwm_left.ChangeDutyCycle(0)
-            self.pwm_right.ChangeDutyCycle(0)
+        if dt > 0.5:
+            self.stop_motors()
+
+    def stop_motors(self):
+        GPIO.output(self.in1, GPIO.LOW)
+        GPIO.output(self.in2, GPIO.LOW)
+        GPIO.output(self.in3, GPIO.LOW)
+        GPIO.output(self.in4, GPIO.LOW)
+        self.pwm_left.ChangeDutyCycle(0)
+        self.pwm_right.ChangeDutyCycle(0)
+
+    def destroy_node(self):
+        self.stop_motors()
+        GPIO.cleanup()
+        super().destroy_node()
 
 
 def main():
     rclpy.init()
     node = DiffDriveL298N()
-    rclpy.spin(node)
-    rclpy.shutdown()
-
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
