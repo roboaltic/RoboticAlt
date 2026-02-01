@@ -50,30 +50,27 @@ class DiffDriveL298N(Node):
 
 
     # ===== CALLBACK =====
-    def cmd_vel_callback(self, msg: Twist):
-        linear = msg.linear.x
+def cmd_vel_callback(self, msg: Twist):
+    linear = msg.linear.x
 
-        if linear == 0.0:
-            self.stop_motors()
-            return
+    if not GPIO_AVAILABLE:
+        return
 
-        forward = linear > 0
-
-        if GPIO_AVAILABLE:
-            # Left motor
-            GPIO.output(self.in1, GPIO.HIGH if forward else GPIO.LOW)
-            GPIO.output(self.in2, GPIO.LOW if forward else GPIO.HIGH)
-
-            # Right motor
-            GPIO.output(self.in3, GPIO.HIGH if forward else GPIO.LOW)
-            GPIO.output(self.in4, GPIO.LOW if forward else GPIO.HIGH)
-
-    def stop_motors(self):
-        if GPIO_AVAILABLE:
-            GPIO.output(self.in1, GPIO.LOW)
-            GPIO.output(self.in2, GPIO.LOW)
-            GPIO.output(self.in3, GPIO.LOW)
-            GPIO.output(self.in4, GPIO.LOW)
+    if linear > 0:
+        GPIO.output(self.in1, GPIO.HIGH)
+        GPIO.output(self.in2, GPIO.LOW)
+        GPIO.output(self.in3, GPIO.HIGH)
+        GPIO.output(self.in4, GPIO.LOW)
+    elif linear < 0:
+        GPIO.output(self.in1, GPIO.LOW)
+        GPIO.output(self.in2, GPIO.HIGH)
+        GPIO.output(self.in3, GPIO.LOW)
+        GPIO.output(self.in4, GPIO.HIGH)
+    else:
+        GPIO.output(self.in1, GPIO.LOW)
+        GPIO.output(self.in2, GPIO.LOW)
+        GPIO.output(self.in3, GPIO.LOW)
+        GPIO.output(self.in4, GPIO.LOW)
 
 
 def main():
