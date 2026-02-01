@@ -7,12 +7,12 @@ import RPi.GPIO as GPIO
 # Left motor
 IN1 = 17
 IN2 = 27
-ENA = 18  # PWM
+ENA = 22  # PWM
 
 # Right motor
-IN3 = 22
-IN4 = 23
-ENB = 19  # PWM
+IN3 = 26
+IN4 = 19
+ENB = 13  # PWM
 
 PWM_FREQ = 1000
 MAX_DUTY = 100
