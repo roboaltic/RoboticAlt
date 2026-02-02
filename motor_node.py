@@ -17,9 +17,9 @@ class DiffDriveL298N(Node):
         self.ENA = 22  # PWM
 
         # Right motor
-        self.IN3 = 23
-        self.IN4 = 24
-        self.ENB = 25  # PWM
+        self.IN3 = 26
+        self.IN4 = 19
+        self.ENB = 13  # PWM
 
         # ===== PWM CONFIG =====
         self.PWM_FREQ = 1000        # Hz
