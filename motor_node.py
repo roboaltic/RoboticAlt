@@ -5,7 +5,6 @@ import lgpio
 from time import time
 
 class DiffDriveL298N(Node):
-
     def __init__(self):
         super().__init__('diff_drive_l298n')
 
@@ -22,7 +21,7 @@ class DiffDriveL298N(Node):
 
         # ===== PWM CONFIG =====
         self.PWM_FREQ = 1000        # Hz
-        self.MAX_DUTY = 0.8         # 0–1.0 (80% мощности)
+        self.MAX_DUTY = 0.8         # Максимальная мощность 80%
 
         # ===== WATCHDOG CONFIG =====
         self.CMD_TIMEOUT = 0.5      # секунд без cmd_vel → стоп
@@ -36,7 +35,7 @@ class DiffDriveL298N(Node):
         # Остановить моторы на старте
         self.stop_motors()
 
-        # ===== ROS INTERFACES =====
+        # ===== ROS SUBSCRIPTION =====
         self.subscription = self.create_subscription(
             Twist,
             '/cmd_vel',
@@ -59,11 +58,11 @@ class DiffDriveL298N(Node):
         linear = msg.linear.x
         angular = msg.angular.z
 
-        # Differential drive
+        # Дифференциальное управление
         left = linear - angular
         right = linear + angular
 
-        # Clamp to [-1.0, 1.0]
+        # Ограничение [-1.0, 1.0]
         left = max(min(left, 1.0), -1.0)
         right = max(min(right, 1.0), -1.0)
 
@@ -108,6 +107,7 @@ class DiffDriveL298N(Node):
         self.stop_motors()
         lgpio.gpiochip_close(self.chip)
         super().destroy_node()
+
 
 def main():
     rclpy.init()
