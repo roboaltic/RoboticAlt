@@ -9,12 +9,12 @@ class DiffDriveL298N(Node):
         super().__init__('diff_drive_l298n')
 
         # ===== GPIO PINS (BCM) =====
-        # Left motor
+        # Левый мотор
         self.IN1 = 17
         self.IN2 = 27
         self.ENA = 22  # PWM
 
-        # Right motor
+        # Правый мотор
         self.IN3 = 26
         self.IN4 = 19
         self.ENB = 13  # PWM
@@ -28,7 +28,7 @@ class DiffDriveL298N(Node):
         self.last_cmd_time = time()
 
         # ===== GPIO INIT =====
-        self.chip = lgpio.gpiochip_open(0)
+        self.chip = lgpio.gpiochip_open(4)
         for pin in [self.IN1, self.IN2, self.IN3, self.IN4]:
             lgpio.gpio_claim_output(self.chip, pin)
 
@@ -90,7 +90,11 @@ class DiffDriveL298N(Node):
             return
 
         # ===== PWM =====
-        duty = int(abs(value) * self.MAX_DUTY * 1_000_000)  # lgpio: 0–1_000_000
+        duty = int(abs(value) * self.MAX_DUTY * 1_000_000)
+
+        # Ограничиваем строго 0-1_000_000
+        duty = max(0, min(duty, 1_000_000))
+
         lgpio.tx_pwm(self.chip, en, self.PWM_FREQ, duty)
         self.get_logger().debug(f"Motor {en}: duty={duty}")
 
