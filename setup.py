@@ -1,6 +1,6 @@
 from setuptools import setup
 
-package_name = 'diff_drive_l298n'
+package_name = 'camera_driver'
 
 setup(
     name=package_name,
@@ -9,13 +9,13 @@ setup(
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='artem',
-    maintainer_email='artem@todo.todo',
-    description='L298N diff drive controller',
-    license='MIT',
+    maintainer_email='artem@example.com',
+    description='ROS2 node to publish USB camera images',
+    license='Apache License 2.0',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'diff_drive_node = diff_drive_l298n.motor_node:main',
+            'camera_node = camera_driver.camera_node:main'
         ],
     },
 )
