@@ -1,130 +1,65 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-import RPi.GPIO as GPIO
+import lgpio
+
+GPIO_CHIP = 4   # !!! номер из gpioinfo
+
+ENA = 22
+IN1 = 17
+IN2 = 27
+ENB = 13
+IN3 = 26
+IN4 = 19
 
 
 class DiffDriveL298N(Node):
-
     def __init__(self):
         super().__init__('diff_drive_l298n')
 
-        # ===== PARAMETERS =====
-        self.declare_parameter('max_linear_speed', 0.3)
-        self.declare_parameter('max_angular_speed', 1.2)
-        self.declare_parameter('pwm_frequency', 1000)
+        self.chip = lgpio.gpiochip_open(GPIO_CHIP)
 
-        self.max_linear = self.get_parameter(
-            'max_linear_speed').value
-        self.max_angular = self.get_parameter(
-            'max_angular_speed').value
-        self.pwm_freq = self.get_parameter(
-            'pwm_frequency').value
+        for pin in [ENA, IN1, IN2, ENB, IN3, IN4]:
+            lgpio.gpio_claim_output(self.chip, pin)
 
-        # ===== GPIO PINS (BCM) =====
-        # L298N
-        self.in1 = 17   # Motor A
-        self.in2 = 27
-        self.in3 = 26   # Motor B
-        self.in4 = 19
-
-        self.en_a = 22  # PWM Motor A
-        self.en_b = 13  # PWM Motor B
-
-        # ===== GPIO INIT =====
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
-
-        GPIO.setup(self.in1, GPIO.OUT)
-        GPIO.setup(self.in2, GPIO.OUT)
-        GPIO.setup(self.in3, GPIO.OUT)
-        GPIO.setup(self.in4, GPIO.OUT)
-        GPIO.setup(self.en_a, GPIO.OUT)
-        GPIO.setup(self.en_b, GPIO.OUT)
-
-        self.pwm_left = GPIO.PWM(self.en_a, self.pwm_freq)
-        self.pwm_right = GPIO.PWM(self.en_b, self.pwm_freq)
-
-        self.pwm_left.start(0)
-        self.pwm_right.start(0)
-
-        self.stop_motors()
-
-        self.get_logger().info("L298N motor driver initialized")
-
-        # ===== ROS SUB =====
-        self.create_subscription(
+        self.subscription = self.create_subscription(
             Twist,
             '/cmd_vel',
             self.cmd_vel_callback,
             10
         )
 
-        # ===== WATCHDOG =====
-        self.last_cmd_time = self.get_clock().now()
-        self.create_timer(0.1, self.watchdog_check)
+        self.get_logger().info("GPIO via initialized")
 
-    # ======================================================
+    def cmd_vel_callback(self, msg):
+        speed = msg.linear.x
 
-    def cmd_vel_callback(self, msg: Twist):
-        self.last_cmd_time = self.get_clock().now()
-
-        # --- LIMIT INPUT ---
-        linear = max(
-            -self.max_linear,
-            min(self.max_linear, msg.linear.x)
-        )
-        angular = max(
-            -self.max_angular,
-            min(self.max_angular, msg.angular.z)
-        )
-
-        # --- DIFF DRIVE ---
-        left = linear - angular
-        right = linear + angular
-
-        left_pwm = min(abs(left) / self.max_linear * 100, 100)
-        right_pwm = min(abs(right) / self.max_linear * 100, 100)
-
-        # --- LEFT MOTOR ---
-        if left >= 0:
-            GPIO.output(self.in1, GPIO.HIGH)
-            GPIO.output(self.in2, GPIO.LOW)
+        if speed > 0:
+            self.set_motor(1, True)
+            self.set_motor(2, True)
+        elif speed < 0:
+            self.set_motor(1, False)
+            self.set_motor(2, False)
         else:
-            GPIO.output(self.in1, GPIO.LOW)
-            GPIO.output(self.in2, GPIO.HIGH)
-
-        # --- RIGHT MOTOR ---
-        if right >= 0:
-            GPIO.output(self.in3, GPIO.HIGH)
-            GPIO.output(self.in4, GPIO.LOW)
-        else:
-            GPIO.output(self.in3, GPIO.LOW)
-            GPIO.output(self.in4, GPIO.HIGH)
-
-        self.pwm_left.ChangeDutyCycle(left_pwm)
-        self.pwm_right.ChangeDutyCycle(right_pwm)
-
-    # ======================================================
-
-    def watchdog_check(self):
-        dt = (self.get_clock().now() -
-              self.last_cmd_time).nanoseconds / 1e9
-
-        if dt > 0.5:
             self.stop_motors()
 
+    def set_motor(self, motor, forward):
+        if motor == 1:
+            lgpio.gpio_write(self.chip, IN1, int(forward))
+            lgpio.gpio_write(self.chip, IN2, int(not forward))
+            lgpio.gpio_write(self.chip, ENA, 1)
+        else:
+            lgpio.gpio_write(self.chip, IN3, int(forward))
+            lgpio.gpio_write(self.chip, IN4, int(not forward))
+            lgpio.gpio_write(self.chip, ENB, 1)
+
     def stop_motors(self):
-        GPIO.output(self.in1, GPIO.LOW)
-        GPIO.output(self.in2, GPIO.LOW)
-        GPIO.output(self.in3, GPIO.LOW)
-        GPIO.output(self.in4, GPIO.LOW)
-        self.pwm_left.ChangeDutyCycle(0)
-        self.pwm_right.ChangeDutyCycle(0)
+        for pin in [ENA, ENB, IN1, IN2, IN3, IN4]:
+            lgpio.gpio_write(self.chip, pin, 0)
 
     def destroy_node(self):
         self.stop_motors()
-        GPIO.cleanup()
+        lgpio.gpiochip_close(self.chip)
         super().destroy_node()
 
 
