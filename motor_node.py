@@ -1,74 +1,93 @@
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image
-from cv_bridge import CvBridge
-import cv2
+from geometry_msgs.msg import Twist
+import lgpio
 
-class CameraNode(Node):
+# ===== GPIO CONFIG =====
+GPIO_CHIP = 4
+ENA = 22   # PWM LEFT
+IN1 = 17
+IN2 = 27
+ENB = 13   # PWM RIGHT
+IN3 = 26
+IN4 = 19
+
+# ===== ROBOT PARAMS =====
+WHEEL_BASE = 0.18
+MAX_SPEED = 0.6
+PWM_FREQ = 1000
+
+class DiffDriveL298N(Node):
     def __init__(self):
-        super().__init__('camera_node')
+        super().__init__('diff_drive_l298n')
 
-        # Параметры
-        self.declare_parameter('device', '/dev/video0')
-        self.declare_parameter('fps', 15)
-        self.declare_parameter('width', 640)
-        self.declare_parameter('height', 480)
+        self.chip = lgpio.gpiochip_open(GPIO_CHIP)
+        for pin in [IN1, IN2, IN3, IN4]:
+            lgpio.gpio_claim_output(self.chip, pin)
+        lgpio.gpio_claim_output(self.chip, ENA)
+        lgpio.gpio_claim_output(self.chip, ENB)
 
-        device = self.get_parameter('device').get_parameter_value().string_value
-        fps = self.get_parameter('fps').get_parameter_value().integer_value
-        width = self.get_parameter('width').get_parameter_value().integer_value
-        height = self.get_parameter('height').get_parameter_value().integer_value
+        lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, 0)
+        lgpio.tx_pwm(self.chip, ENB, PWM_FREQ, 0)
 
-        self.cap = cv2.VideoCapture(device)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        self.cap.set(cv2.CAP_PROP_FPS, fps)
+        self.last_left = 0.0
+        self.last_right = 0.0
 
-        if not self.cap.isOpened():
-            self.get_logger().error(f"❌ Не удалось открыть камеру на {device}")
-            raise RuntimeError('Camera open failed')
+        self.subscription = self.create_subscription(
+            Twist,
+            '/cmd_vel',
+            self.cmd_vel_callback,
+            10
+        )
 
-        # Publisher с QoS buffer
-        from rclpy.qos import QoSProfile
-        qos_profile = QoSProfile(depth=10)
-        self.pub_raw = self.create_publisher(Image, '/image_raw', qos_profile)
-        self.pub_compressed = self.create_publisher(Image, '/image_raw/compressed', qos_profile)
+        self.get_logger().info("✅ DiffDriveL298N initialized")
 
-        self.bridge = CvBridge()
-        self.frame_count = 0
+    def cmd_vel_callback(self, msg):
+        v = msg.linear.x
+        w = msg.angular.z
 
-        # Таймер для регулярного захвата
-        timer_period = 1.0 / fps
-        self.timer = self.create_timer(timer_period, self.timer_callback)
+        v_left  = self.limit_speed(v - w * WHEEL_BASE / 2)
+        v_right = self.limit_speed(v + w * WHEEL_BASE / 2)
 
-        self.get_logger().info("✅ CameraNode initialized")
+        # публикуем только если изменилось
+        if abs(v_left - self.last_left) > 0.01 or abs(v_right - self.last_right) > 0.01:
+            self.set_motor_left(v_left)
+            self.set_motor_right(v_right)
+            self.last_left = v_left
+            self.last_right = v_right
+            self.get_logger().info(f"cmd_vel updated: left={v_left:.2f}, right={v_right:.2f}")
 
-    def timer_callback(self):
-        ret, frame = self.cap.read()
-        if not ret:
-            self.get_logger().warn("❌ Не удалось получить кадр")
-            return
+    def limit_speed(self, v):
+        return max(min(v, MAX_SPEED), -MAX_SPEED)
 
-        msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-        self.pub_raw.publish(msg)
+    def set_motor_left(self, speed):
+        forward = speed >= 0
+        duty = abs(speed) / MAX_SPEED * 100.0
+        lgpio.gpio_write(self.chip, IN1, int(forward))
+        lgpio.gpio_write(self.chip, IN2, int(not forward))
+        lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, duty)
 
-        # Сжатое изображение
-        _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-        msg_compressed = self.bridge.cv2_to_imgmsg(buffer.tobytes(), encoding='jpeg')
-        self.pub_compressed.publish(msg_compressed)
+    def set_motor_right(self, speed):
+        forward = speed >= 0
+        duty = abs(speed) / MAX_SPEED * 100.0
+        lgpio.gpio_write(self.chip, IN3, int(forward))
+        lgpio.gpio_write(self.chip, IN4, int(not forward))
+        lgpio.tx_pwm(self.chip, ENB, PWM_FREQ, duty)
 
-        self.frame_count += 1
-        if self.frame_count % 15 == 0:  # лог раз в 15 кадров
-            self.get_logger().info(f"Publishing frame {self.frame_count}")
+    def stop(self):
+        lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, 0)
+        lgpio.tx_pwm(self.chip, ENB, PWM_FREQ, 0)
+        for pin in [IN1, IN2, IN3, IN4]:
+            lgpio.gpio_write(self.chip, pin, 0)
 
     def destroy_node(self):
-        self.cap.release()
+        self.stop()
+        lgpio.gpiochip_close(self.chip)
         super().destroy_node()
-
 
 def main():
     rclpy.init()
-    node = CameraNode()
+    node = DiffDriveL298N()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
