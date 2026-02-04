@@ -1,96 +1,78 @@
 import rclpy
 from rclpy.node import Node
-
-from sensor_msgs.msg import Image, CompressedImage
+from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
-
 import cv2
-import time
-
 
 class CameraNode(Node):
-
     def __init__(self):
         super().__init__('camera_node')
 
-        # ===== Publishers =====
-        self.pub_raw = self.create_publisher(Image, '/image_raw', 10)
-        self.pub_compressed = self.create_publisher(
-            CompressedImage,
-            '/image_raw/compressed',
-            10
-        )
+        # Параметры
+        self.declare_parameter('device', '/dev/video0')
+        self.declare_parameter('fps', 15)
+        self.declare_parameter('width', 640)
+        self.declare_parameter('height', 480)
 
-        self.bridge = CvBridge()
+        device = self.get_parameter('device').get_parameter_value().string_value
+        fps = self.get_parameter('fps').get_parameter_value().integer_value
+        width = self.get_parameter('width').get_parameter_value().integer_value
+        height = self.get_parameter('height').get_parameter_value().integer_value
 
-        # ===== Camera config (Logitech C270) =====
-        self.device = '/dev/video0'   # Твой USB-порт
-        self.width = 640
-        self.height = 480
-        self.fps = 15.0
-
-        # Открываем камеру через V4L2
-        self.cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
+        self.cap = cv2.VideoCapture(device)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self.cap.set(cv2.CAP_PROP_FPS, fps)
 
         if not self.cap.isOpened():
-            self.get_logger().fatal('❌ Не удалось открыть камеру на /dev/video0')
+            self.get_logger().error(f"❌ Не удалось открыть камеру на {device}")
             raise RuntimeError('Camera open failed')
 
-        # Настройка MJPEG → минимальная нагрузка на CPU
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+        # Publisher с QoS buffer
+        from rclpy.qos import QoSProfile
+        qos_profile = QoSProfile(depth=10)
+        self.pub_raw = self.create_publisher(Image, '/image_raw', qos_profile)
+        self.pub_compressed = self.create_publisher(Image, '/image_raw/compressed', qos_profile)
 
-        self.period = 1.0 / self.fps
-        self.last_time = time.time()
+        self.bridge = CvBridge()
+        self.frame_count = 0
 
-        # Таймер ROS для публикации кадров
-        self.timer = self.create_timer(self.period, self.timer_callback)
+        # Таймер для регулярного захвата
+        timer_period = 1.0 / fps
+        self.timer = self.create_timer(timer_period, self.timer_callback)
 
-        self.get_logger().info(
-            f'✅ Camera started: {self.width}x{self.height} @ {self.fps} FPS (MJPEG)'
-        )
+        self.get_logger().info("✅ CameraNode initialized")
 
     def timer_callback(self):
         ret, frame = self.cap.read()
         if not ret:
-            self.get_logger().warning('⚠️ Кадр не получен')
+            self.get_logger().warn("❌ Не удалось получить кадр")
             return
 
-        now = self.get_clock().now().to_msg()
+        msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+        self.pub_raw.publish(msg)
 
-        # ===== RAW image =====
-        raw_msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
-        raw_msg.header.stamp = now
-        raw_msg.header.frame_id = 'camera_frame'
-        self.pub_raw.publish(raw_msg)
+        # Сжатое изображение
+        _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        msg_compressed = self.bridge.cv2_to_imgmsg(buffer.tobytes(), encoding='jpeg')
+        self.pub_compressed.publish(msg_compressed)
 
-        # ===== COMPRESSED image (JPEG) =====
-        compressed_msg = CompressedImage()
-        compressed_msg.header.stamp = now
-        compressed_msg.header.frame_id = 'camera_frame'
-        compressed_msg.format = 'jpeg'
-
-        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]
-        success, encoded = cv2.imencode('.jpg', frame, encode_param)
-
-        if success:
-            compressed_msg.data = encoded.tobytes()
-            self.pub_compressed.publish(compressed_msg)
+        self.frame_count += 1
+        if self.frame_count % 15 == 0:  # лог раз в 15 кадров
+            self.get_logger().info(f"Publishing frame {self.frame_count}")
 
     def destroy_node(self):
         self.cap.release()
         super().destroy_node()
 
 
-def main(args=None):
-    rclpy.init(args=args)
+def main():
+    rclpy.init()
     node = CameraNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
-
-
-if __name__ == '__main__':
-    main()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
