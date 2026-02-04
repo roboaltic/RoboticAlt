@@ -14,7 +14,7 @@ IN4 = 19
 
 # ===== ROBOT PARAMS =====
 WHEEL_BASE = 0.09
-MAX_SPEED = 0.6
+MAX_SPEED = 0.3
 PWM_FREQ = 1000
 
 class DiffDriveL298N(Node):
