@@ -1,154 +1,78 @@
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
-import lgpio
-import math
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+import cv2
 
-
-# ===== GPIO CONFIG =====
-GPIO_CHIP = 4
-
-ENA = 22   # PWM LEFT
-IN1 = 17
-IN2 = 27
-
-ENB = 13   # PWM RIGHT
-IN3 = 26
-IN4 = 19
-
-
-# ===== ROBOT PARAMS =====
-WHEEL_BASE = 0.09      # расстояние между колесами (м)
-MAX_SPEED = 0.6        # м/с (условно)
-PWM_FREQ = 1000        # Hz
-
-
-class DiffDriveL298N(Node):
-
+class CameraNode(Node):
     def __init__(self):
-        super().__init__('diff_drive_l298n')
+        super().__init__('camera_node')
 
-        # Open GPIO
-        self.chip = lgpio.gpiochip_open(GPIO_CHIP)
+        # Параметры
+        self.declare_parameter('device', '/dev/video0')
+        self.declare_parameter('fps', 15)
+        self.declare_parameter('width', 640)
+        self.declare_parameter('height', 480)
 
-        # Setup pins
-        for pin in [IN1, IN2, IN3, IN4]:
-            lgpio.gpio_claim_output(self.chip, pin)
+        device = self.get_parameter('device').get_parameter_value().string_value
+        fps = self.get_parameter('fps').get_parameter_value().integer_value
+        width = self.get_parameter('width').get_parameter_value().integer_value
+        height = self.get_parameter('height').get_parameter_value().integer_value
 
-        lgpio.gpio_claim_output(self.chip, ENA)
-        lgpio.gpio_claim_output(self.chip, ENB)
+        self.cap = cv2.VideoCapture(device)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self.cap.set(cv2.CAP_PROP_FPS, fps)
 
-        # Init PWM
-        lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, 0)
-        lgpio.tx_pwm(self.chip, ENB, PWM_FREQ, 0)
+        if not self.cap.isOpened():
+            self.get_logger().error(f"❌ Не удалось открыть камеру на {device}")
+            raise RuntimeError('Camera open failed')
 
-        # ROS sub
-        self.subscription = self.create_subscription(
-            Twist,
-            '/cmd_vel',
-            self.cmd_vel_callback,
-            10
-        )
+        # Publisher с QoS buffer
+        from rclpy.qos import QoSProfile
+        qos_profile = QoSProfile(depth=10)
+        self.pub_raw = self.create_publisher(Image, '/image_raw', qos_profile)
+        self.pub_compressed = self.create_publisher(Image, '/image_raw/compressed', qos_profile)
 
-        self.get_logger().info("✅ Diff Drive initialized")
+        self.bridge = CvBridge()
+        self.frame_count = 0
 
+        # Таймер для регулярного захвата
+        timer_period = 1.0 / fps
+        self.timer = self.create_timer(timer_period, self.timer_callback)
 
-    # =============================
-    # CMD_VEL CALLBACK
-    # =============================
-    def cmd_vel_callback(self, msg):
+        self.get_logger().info("✅ CameraNode initialized")
 
-        v = msg.linear.x
-        w = msg.angular.z
+    def timer_callback(self):
+        ret, frame = self.cap.read()
+        if not ret:
+            self.get_logger().warn("❌ Не удалось получить кадр")
+            return
 
-        # Differential kinematics
-        v_left  = v - (w * WHEEL_BASE / 2.0)
-        v_right = v + (w * WHEEL_BASE / 2.0)
+        msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+        self.pub_raw.publish(msg)
 
-        # Normalize
-        v_left  = self.limit_speed(v_left)
-        v_right = self.limit_speed(v_right)
+        # Сжатое изображение
+        _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        msg_compressed = self.bridge.cv2_to_imgmsg(buffer.tobytes(), encoding='jpeg')
+        self.pub_compressed.publish(msg_compressed)
 
-        # Apply motors
-        self.set_motor_left(v_left)
-        self.set_motor_right(v_right)
-
-
-    # =============================
-    # SPEED LIMIT
-    # =============================
-    def limit_speed(self, v):
-
-        if v > MAX_SPEED:
-            v = MAX_SPEED
-        elif v < -MAX_SPEED:
-            v = -MAX_SPEED
-
-        return v
-
-
-    # =============================
-    # LEFT MOTOR
-    # =============================
-    def set_motor_left(self, speed):
-
-        forward = speed >= 0
-        duty = abs(speed) / MAX_SPEED * 100.0
-
-        lgpio.gpio_write(self.chip, IN1, int(forward))
-        lgpio.gpio_write(self.chip, IN2, int(not forward))
-
-        lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, duty)
-
-
-    # =============================
-    # RIGHT MOTOR
-    # =============================
-    def set_motor_right(self, speed):
-
-        forward = speed >= 0
-        duty = abs(speed) / MAX_SPEED * 100.0
-
-        lgpio.gpio_write(self.chip, IN3, int(forward))
-        lgpio.gpio_write(self.chip, IN4, int(not forward))
-
-        lgpio.tx_pwm(self.chip, ENB, PWM_FREQ, duty)
-
-
-    # =============================
-    # STOP
-    # =============================
-    def stop(self):
-
-        lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, 0)
-        lgpio.tx_pwm(self.chip, ENB, PWM_FREQ, 0)
-
-        for pin in [IN1, IN2, IN3, IN4]:
-            lgpio.gpio_write(self.chip, pin, 0)
-
+        self.frame_count += 1
+        if self.frame_count % 15 == 0:  # лог раз в 15 кадров
+            self.get_logger().info(f"Publishing frame {self.frame_count}")
 
     def destroy_node(self):
-
-        self.stop()
-        lgpio.gpiochip_close(self.chip)
+        self.cap.release()
         super().destroy_node()
 
 
-# =============================
-# MAIN
-# =============================
 def main():
-
     rclpy.init()
-
-    node = DiffDriveL298N()
-
+    node = CameraNode()
     try:
         rclpy.spin(node)
-
     except KeyboardInterrupt:
         pass
-
     finally:
         node.destroy_node()
         rclpy.shutdown()
