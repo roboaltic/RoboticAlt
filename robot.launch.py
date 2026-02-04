@@ -1,6 +1,7 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
+
 def generate_launch_description():
 
     camera_node = Node(
@@ -20,13 +21,13 @@ def generate_launch_description():
 
     motor_node = Node(
         package='motor_driver',
-        executable='motor_node',
-        name='motor_node',
-        output='screen'
+        executable='diff_drive_l298n, diff_drive_node',
+        name='diff_drive_l298n',
+        output='screen',
+        emulate_tty=True
     )
 
     return LaunchDescription([
         camera_node,
         motor_node
     ])
-
