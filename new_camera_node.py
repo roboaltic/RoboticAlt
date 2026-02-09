@@ -22,26 +22,75 @@ class CameraNode(Node):
 
         self.bridge = CvBridge()
 
-        # Открываем камеру (обычно 0 или /dev/video0)
-        self.cap = cv2.VideoCapture(0)
+        self.device_id = 0
+
+        self.cap = None
+        self.open_camera()
+
+        # Счётчик кадров
+        self.frame_count = 0
+        self.clear_interval = 500
+
+        # 20 FPS
+        self.timer = self.create_timer(0.05, self.timer_callback)
+
+        self.get_logger().info('Camera node started with auto buffer clear')
+
+
+    # =============================
+    # Открытие камеры
+    # =============================
+    def open_camera(self):
+
+        if self.cap is not None:
+            self.cap.release()
+
+        self.cap = cv2.VideoCapture(self.device_id)
+
+        # Минимизируем внутренний буфер
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         if not self.cap.isOpened():
             self.get_logger().error('Camera not opened!')
-            return
-
-        # Частота кадров
-        self.timer = self.create_timer(0.05, self.timer_callback)
-
-        self.get_logger().info('Camera node started')
+        else:
+            self.get_logger().info('Camera opened')
 
 
+    # =============================
+    # Очистка буфера
+    # =============================
+    def clear_buffer(self):
+
+        self.get_logger().info('Clearing camera buffer...')
+
+        # Пересоздаём поток
+        self.open_camera()
+
+        self.frame_count = 0
+
+
+    # =============================
+    # Основной цикл
+    # =============================
     def timer_callback(self):
+
+        if not self.cap.isOpened():
+            return
 
         ret, frame = self.cap.read()
 
         if not ret:
             self.get_logger().warn('Frame not received')
             return
+
+        # Счётчик кадров
+        self.frame_count += 1
+
+        # Очистка каждые 500 кадров
+        if self.frame_count >= self.clear_interval:
+            self.clear_buffer()
+            return
+
 
         msg = self.bridge.cv2_to_imgmsg(
             frame,
@@ -51,16 +100,32 @@ class CameraNode(Node):
         self.publisher.publish(msg)
 
 
+    # =============================
+    # Завершение
+    # =============================
+    def destroy_node(self):
+
+        if self.cap is not None:
+            self.cap.release()
+
+        super().destroy_node()
+
+
 def main(args=None):
 
     rclpy.init(args=args)
 
     node = CameraNode()
 
-    rclpy.spin(node)
+    try:
+        rclpy.spin(node)
 
-    node.destroy_node()
-    rclpy.shutdown()
+    except KeyboardInterrupt:
+        pass
+
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
