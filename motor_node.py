@@ -105,16 +105,16 @@ class DiffDrive(Node):
         vl = self.v - self.w * WHEEL_BASE / 2
         vr = self.v + self.w * WHEEL_BASE / 2
 
-        # Правый мотор стартует первым, микрозадержка перед левым
+        # Правый мотор стартует первым
         self.set_right(vr)
-        time.sleep(0.015)  # 15 мс, незаметно
+        time.sleep(0.015)  # 15 мс микрозадержка для компенсации сопротивления
         self.set_left(vl)
 
     # ======================================
     # MOTOR
     # ======================================
     def set_left(self, speed):
-        fwd = speed >= 0  # оригинальная логика
+        fwd = speed >= 0  # оставляем оригинальное направление
         duty = abs(speed) / MAX_SPEED * 100
 
         lgpio.gpio_write(self.chip, IN1, int(fwd))
@@ -123,7 +123,8 @@ class DiffDrive(Node):
         lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, duty)
 
     def set_right(self, speed):
-        fwd = speed >= 0  # оригинальная логика
+        # ===== Инвертируем только физически правый мотор =====
+        fwd = speed < 0  # инверсия под подключение проводов
         duty = abs(speed) / MAX_SPEED * 100
 
         lgpio.gpio_write(self.chip, IN3, int(fwd))
@@ -208,3 +209,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
