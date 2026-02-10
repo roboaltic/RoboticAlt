@@ -4,201 +4,271 @@ import rclpy
 from rclpy.node import Node
 
 from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
 
-import RPi.GPIO as GPIO
-import time
+import lgpio
 import math
+import time
+import sys
 
 
-class DiffDriveNode(Node):
+# ================= GPIO ==================
+
+GPIO_CHIP = 4
+
+ENA = 22
+IN1 = 17
+IN2 = 27
+
+ENB = 13
+IN3 = 26
+IN4 = 19
+
+
+# ================ ROBOT ==================
+
+WHEEL_BASE = 0.09
+MAX_SPEED = 0.3
+PWM_FREQ = 1000
+
+
+# ============== STALL ====================
+
+STALL_TIME = 1.5
+MIN_REAL_SPEED = 0.02
+MIN_CMD_SPEED = 0.1
+
+
+# ========================================
+
+
+class DiffDrive(Node):
 
     def __init__(self):
+
         super().__init__('diff_drive_node')
 
-        # ===== GPIO SETUP =====
 
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
+        # ---------- GPIO ----------
 
-        # Motor pins (CHANGE IF NEEDED)
-        self.ENA = 22
-        self.IN1 = 17
-        self.IN2 = 27
+        self.chip = lgpio.gpiochip_open(GPIO_CHIP)
 
-        self.ENB = 13
-        self.IN3 = 26
-        self.IN4 = 19
+        pins = [ENA, IN1, IN2, ENB, IN3, IN4]
 
-        pins = [
-            self.ENA, self.IN1, self.IN2,
-            self.ENB, self.IN3, self.IN4
-        ]
+        try:
+            for p in pins:
+                lgpio.gpio_claim_output(self.chip, p)
 
-        for p in pins:
-            GPIO.setup(p, GPIO.OUT)
+        except lgpio.error as e:
+            self.get_logger().error(f"GPIO ERROR: {e}")
+            sys.exit(1)
 
-        self.pwmA = GPIO.PWM(self.ENA, 1000)
-        self.pwmB = GPIO.PWM(self.ENB, 1000)
 
-        self.pwmA.start(0)
-        self.pwmB.start(0)
+        lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, 0)
+        lgpio.tx_pwm(self.chip, ENB, PWM_FREQ, 0)
 
-        # ===== ROS =====
+
+        # ---------- ROS ----------
 
         self.sub = self.create_subscription(
             Twist,
             '/cmd_vel',
-            self.cmd_callback,
+            self.cmd_vel_cb,
             10
         )
 
-        # ===== SAFETY =====
 
-        self.last_cmd_time = time.time()
+        self.odom_pub = self.create_publisher(
+            Odometry,
+            '/odom',
+            10
+        )
 
-        self.current_linear = 0.0
-        self.current_angular = 0.0
 
-        self.emergency_stop = False
-
-        # settings
-        self.stall_timeout = 1.5     # sec
-        self.min_cmd = 0.05          # m/s
-
-        # Timer 20 Hz
         self.timer = self.create_timer(
             0.05,
-            self.safety_check
+            self.update_odom
         )
 
-        self.get_logger().info("DiffDrive node with protection started")
+
+        # ---------- STATE ----------
+
+        self.v = 0.0
+        self.w = 0.0
+
+        self.x = 0.0
+        self.y = 0.0
+        self.th = 0.0
+
+        self.last_time = self.get_clock().now()
+
+        self.last_motion = self.get_clock().now()
+        self.stalled = False
 
 
-    # ================= MOTOR CONTROL =================
-
-    def set_motor(self, left, right):
-
-        # Direction LEFT
-        if left >= 0:
-            GPIO.output(self.IN1, GPIO.HIGH)
-            GPIO.output(self.IN2, GPIO.LOW)
-        else:
-            GPIO.output(self.IN1, GPIO.LOW)
-            GPIO.output(self.IN2, GPIO.HIGH)
-
-        # Direction RIGHT
-        if right >= 0:
-            GPIO.output(self.IN3, GPIO.HIGH)
-            GPIO.output(self.IN4, GPIO.LOW)
-        else:
-            GPIO.output(self.IN3, GPIO.LOW)
-            GPIO.output(self.IN4, GPIO.HIGH)
-
-        # PWM
-        self.pwmA.ChangeDutyCycle(abs(left))
-        self.pwmB.ChangeDutyCycle(abs(right))
+        self.get_logger().info("✅ DiffDrive + Stall protection READY")
 
 
-    def stop_motors(self):
 
-        self.pwmA.ChangeDutyCycle(0)
-        self.pwmB.ChangeDutyCycle(0)
+    # ======================================
+    # CMD_VEL
+    # ======================================
 
-        GPIO.output(self.IN1, GPIO.LOW)
-        GPIO.output(self.IN2, GPIO.LOW)
-        GPIO.output(self.IN3, GPIO.LOW)
-        GPIO.output(self.IN4, GPIO.LOW)
+    def cmd_vel_cb(self, msg):
 
-
-    # ================= CMD_VEL =================
-
-    def cmd_callback(self, msg: Twist):
-
-        self.last_cmd_time = time.time()
-
-        self.current_linear = msg.linear.x
-        self.current_angular = msg.angular.z
-
-        # Reset emergency
-        if abs(self.current_linear) < 0.01:
-            if self.emergency_stop:
-                self.get_logger().warn("Emergency stop released")
-
-            self.emergency_stop = False
-
-
-        if self.emergency_stop:
-            self.stop_motors()
+        if self.stalled:
             return
 
 
-        left, right = self.compute_wheels(
-            self.current_linear,
-            self.current_angular
-        )
-
-        self.set_motor(left, right)
+        self.v = self.limit(msg.linear.x)
+        self.w = self.limit(msg.angular.z)
 
 
-    # ================= KINEMATICS =================
-
-    def compute_wheels(self, v, w):
-
-        wheel_base = 0.16   # meters
-        max_pwm = 80
-
-        left = v - w * wheel_base / 2
-        right = v + w * wheel_base / 2
-
-        left = max(-1.0, min(1.0, left))
-        right = max(-1.0, min(1.0, right))
-
-        left_pwm = left * max_pwm
-        right_pwm = right * max_pwm
-
-        return left_pwm, right_pwm
+        vl = self.v - self.w * WHEEL_BASE / 2
+        vr = self.v + self.w * WHEEL_BASE / 2
 
 
-    # ================= SAFETY =================
-
-    def safety_check(self):
-
-        if self.emergency_stop:
-            return
+        self.set_left(vl)
+        self.set_right(vr)
 
 
-        now = time.time()
-        dt = now - self.last_cmd_time
 
-        moving_cmd = abs(self.current_linear) > self.min_cmd
+    # ======================================
+    # MOTOR
+    # ======================================
+
+    def set_left(self, speed):
+
+        fwd = speed >= 0
+        duty = abs(speed) / MAX_SPEED * 100
+
+        lgpio.gpio_write(self.chip, IN1, int(fwd))
+        lgpio.gpio_write(self.chip, IN2, int(not fwd))
+
+        lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, duty)
 
 
-        if moving_cmd and dt > self.stall_timeout:
+    def set_right(self, speed):
 
-            self.get_logger().error(
-                "MOTOR STALL DETECTED! EMERGENCY STOP!"
-            )
+        fwd = speed >= 0
+        duty = abs(speed) / MAX_SPEED * 100
 
-            self.emergency_stop = True
-            self.stop_motors()
+        lgpio.gpio_write(self.chip, IN3, int(fwd))
+        lgpio.gpio_write(self.chip, IN4, int(not fwd))
+
+        lgpio.tx_pwm(self.chip, ENB, PWM_FREQ, duty)
 
 
-    # ================= CLEANUP =================
+
+    def stop(self):
+
+        lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, 0)
+        lgpio.tx_pwm(self.chip, ENB, PWM_FREQ, 0)
+
+
+
+    # ======================================
+    # ODOM
+    # ======================================
+
+    def update_odom(self):
+
+        now = self.get_clock().now()
+
+        dt = (now - self.last_time).nanoseconds * 1e-9
+
+        self.last_time = now
+
+
+        vx = self.v
+        vth = self.w
+
+
+        self.x += vx * math.cos(self.th) * dt
+        self.y += vx * math.sin(self.th) * dt
+        self.th += vth * dt
+
+
+        self.check_stall()
+
+
+        odom = Odometry()
+
+        odom.header.stamp = now.to_msg()
+        odom.header.frame_id = "odom"
+        odom.child_frame_id = "base_link"
+
+        odom.pose.pose.position.x = self.x
+        odom.pose.pose.position.y = self.y
+
+        odom.twist.twist.linear.x = vx
+        odom.twist.twist.angular.z = vth
+
+
+        self.odom_pub.publish(odom)
+
+
+
+    # ======================================
+    # STALL
+    # ======================================
+
+    def check_stall(self):
+
+        now = self.get_clock().now()
+
+
+        if abs(self.v) > MIN_CMD_SPEED:
+
+            if abs(self.v) < MIN_REAL_SPEED:
+
+                dt = (now - self.last_motion).nanoseconds * 1e-9
+
+
+                if dt > STALL_TIME:
+
+                    self.get_logger().error("🚨 MOTOR STALL!")
+
+                    self.stop()
+
+                    self.stalled = True
+
+                    return
+
+            else:
+
+                self.last_motion = now
+                self.stalled = False
+
+
+
+    # ======================================
+    # UTILS
+    # ======================================
+
+    def limit(self, v):
+
+        return max(min(v, MAX_SPEED), -MAX_SPEED)
+
+
 
     def destroy_node(self):
 
-        self.stop_motors()
-        GPIO.cleanup()
+        self.stop()
+
+        lgpio.gpiochip_close(self.chip)
 
         super().destroy_node()
 
 
 
-def main(args=None):
+# =========================================
 
-    rclpy.init(args=args)
+def main():
 
-    node = DiffDriveNode()
+    rclpy.init()
+
+    node = DiffDrive()
 
     try:
         rclpy.spin(node)
@@ -206,10 +276,13 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
 
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+
     main()
