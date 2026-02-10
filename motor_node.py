@@ -9,59 +9,40 @@ from nav_msgs.msg import Odometry
 import lgpio
 import math
 import time
-import sys
 
 
-# ================= GPIO ==================
+# ================== GPIO ==================
 
-GPIO_CHIP = 4
+ENA = 18   # PWM Left
+IN1 = 23
+IN2 = 24
 
-ENA = 22
-IN1 = 17
-IN2 = 27
+ENB = 13   # PWM Right
+IN3 = 5
+IN4 = 6
 
-ENB = 13
-IN3 = 26
-IN4 = 19
-
-
-# ================ ROBOT ==================
-
-WHEEL_BASE = 0.09
-MAX_SPEED = 0.3
-PWM_FREQ = 1000
+PWM_FREQ = 20000   # 20 kHz
 
 
-# ============== STALL ====================
+# ================== ROBOT PARAMS ==================
 
-STALL_TIME = 1.5
-MIN_REAL_SPEED = 0.02
-MIN_CMD_SPEED = 0.1
+WHEEL_BASE = 0.18        # meters
+MAX_SPEED = 0.25         # m/s
+
+CMD_TIMEOUT = 1.0        # sec
+STALL_TIME = 2.0         # sec
 
 
-# ========================================
+# ================================================
 
 
-class DiffDrive(Node):
+class DiffDriveNode(Node):
 
     def __init__(self):
         super().__init__('diff_drive_node')
 
-        # ---------- GPIO ----------
-        self.chip = lgpio.gpiochip_open(GPIO_CHIP)
-        pins = [ENA, IN1, IN2, ENB, IN3, IN4]
+        # ---------------- ROS ----------------
 
-        try:
-            for p in pins:
-                lgpio.gpio_claim_output(self.chip, p)
-        except lgpio.error as e:
-            self.get_logger().error(f"GPIO ERROR: {e}")
-            sys.exit(1)
-
-        lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, 0)
-        lgpio.tx_pwm(self.chip, ENB, PWM_FREQ, 0)
-
-        # ---------- ROS ----------
         self.sub = self.create_subscription(
             Twist,
             '/cmd_vel',
@@ -75,138 +56,202 @@ class DiffDrive(Node):
             10
         )
 
-        self.timer = self.create_timer(
-            0.05,
-            self.update_odom
-        )
+        self.timer = self.create_timer(0.05, self.update)
 
-        # ---------- STATE ----------
+        # ---------------- GPIO ----------------
+
+        self.chip = lgpio.gpiochip_open(0)
+
+        for pin in [ENA, IN1, IN2, ENB, IN3, IN4]:
+            lgpio.gpio_claim_output(self.chip, pin)
+
+        # ---------------- STATE ----------------
+
         self.v = 0.0
         self.w = 0.0
+
+        self.last_cmd_time = time.time()
+
         self.x = 0.0
         self.y = 0.0
         self.th = 0.0
-        self.last_time = self.get_clock().now()
-        self.last_motion = self.get_clock().now()
-        self.stalled = False
 
-        self.get_logger().info("✅ DiffDrive + Stall protection READY")
+        self.last_time = time.time()
 
-    # ======================================
-    # CMD_VEL
-    # ======================================
+        self.stall_start = None
+
+        self.get_logger().info('DiffDrive L298N node started')
+
+    # ======================================================
+
+    def limit(self, v):
+        return max(min(v, MAX_SPEED), -MAX_SPEED)
+
+    # ======================================================
+
     def cmd_vel_cb(self, msg):
-        if self.stalled:
-            return
 
         self.v = self.limit(msg.linear.x)
-        self.w = self.limit(msg.angular.z)
+        self.w = msg.angular.z
 
-        vl = self.v - self.w * WHEEL_BASE / 2
-        vr = self.v + self.w * WHEEL_BASE / 2
+        self.last_cmd_time = time.time()
 
-        # Правый мотор стартует первым
-        self.set_right(vr)
-        time.sleep(0.015)  # 15 мс микрозадержка для компенсации сопротивления
-        self.set_left(vl)
+    # ======================================================
 
-    # ======================================
-    # MOTOR
-    # ======================================
     def set_left(self, speed):
-        fwd = speed >= 0  # оставляем оригинальное направление
-        duty = abs(speed) / MAX_SPEED * 100
+
+        fwd = speed >= 0
+
+        duty = min(max(abs(speed) / MAX_SPEED * 100, 0.0), 100.0)
 
         lgpio.gpio_write(self.chip, IN1, int(fwd))
         lgpio.gpio_write(self.chip, IN2, int(not fwd))
 
         lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, duty)
 
+    # ======================================================
+
     def set_right(self, speed):
-        # ===== Инвертируем только физически правый мотор =====
-        fwd = speed < 0  # инверсия под подключение проводов
-        duty = abs(speed) / MAX_SPEED * 100
+
+        fwd = speed >= 0
+
+        duty = min(max(abs(speed) / MAX_SPEED * 100, 0.0), 100.0)
 
         lgpio.gpio_write(self.chip, IN3, int(fwd))
         lgpio.gpio_write(self.chip, IN4, int(not fwd))
 
         lgpio.tx_pwm(self.chip, ENB, PWM_FREQ, duty)
 
+    # ======================================================
+
     def stop(self):
+
         lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, 0)
         lgpio.tx_pwm(self.chip, ENB, PWM_FREQ, 0)
 
-    # ======================================
-    # ODOM
-    # ======================================
-    def update_odom(self):
-        now = self.get_clock().now()
-        dt = (now - self.last_time).nanoseconds * 1e-9
+    # ======================================================
+
+    def publish_odom(self, v, w, dt):
+
+        dx = v * math.cos(self.th) * dt
+        dy = v * math.sin(self.th) * dt
+        dth = w * dt
+
+        self.x += dx
+        self.y += dy
+        self.th += dth
+
+        msg = Odometry()
+
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'odom'
+        msg.child_frame_id = 'base_link'
+
+        msg.pose.pose.position.x = self.x
+        msg.pose.pose.position.y = self.y
+
+        qz = math.sin(self.th / 2.0)
+        qw = math.cos(self.th / 2.0)
+
+        msg.pose.pose.orientation.z = qz
+        msg.pose.pose.orientation.w = qw
+
+        msg.twist.twist.linear.x = v
+        msg.twist.twist.angular.z = w
+
+        self.odom_pub.publish(msg)
+
+    # ======================================================
+
+    def check_stall(self, v, duty):
+
+        # Если даём газ, но долго нет движения → стоп
+
+        if duty > 30 and abs(v) < 0.01:
+
+            if self.stall_start is None:
+                self.stall_start = time.time()
+
+            elif time.time() - self.stall_start > STALL_TIME:
+
+                self.get_logger().warn('STALL DETECTED! Emergency stop.')
+
+                self.stop()
+                self.v = 0.0
+                self.w = 0.0
+
+                return True
+        else:
+            self.stall_start = None
+
+        return False
+
+    # ======================================================
+
+    def update(self):
+
+        now = time.time()
+        dt = now - self.last_time
         self.last_time = now
 
-        vx = self.v
-        vth = self.w
+        # -------- Watchdog --------
 
-        self.x += vx * math.cos(self.th) * dt
-        self.y += vx * math.sin(self.th) * dt
-        self.th += vth * dt
+        if now - self.last_cmd_time > CMD_TIMEOUT:
+            self.stop()
+            self.v = 0.0
+            self.w = 0.0
+            return
 
-        self.check_stall()
+        # -------- Kinematics --------
 
-        odom = Odometry()
-        odom.header.stamp = now.to_msg()
-        odom.header.frame_id = "odom"
-        odom.child_frame_id = "base_link"
-        odom.pose.pose.position.x = self.x
-        odom.pose.pose.position.y = self.y
-        odom.twist.twist.linear.x = vx
-        odom.twist.twist.angular.z = vth
+        vl = self.limit(self.v - self.w * WHEEL_BASE / 2)
+        vr = self.limit(self.v + self.w * WHEEL_BASE / 2)
 
-        self.odom_pub.publish(odom)
+        duty_l = abs(vl) / MAX_SPEED * 100
+        duty_r = abs(vr) / MAX_SPEED * 100
 
-    # ======================================
-    # STALL
-    # ======================================
-    def check_stall(self):
-        now = self.get_clock().now()
+        # -------- Stall protect --------
 
-        if abs(self.v) > MIN_CMD_SPEED:
-            if abs(self.v) < MIN_REAL_SPEED:
-                dt = (now - self.last_motion).nanoseconds * 1e-9
-                if dt > STALL_TIME:
-                    self.get_logger().error("🚨 MOTOR STALL!")
-                    self.stop()
-                    self.stalled = True
-                    return
-            else:
-                self.last_motion = now
-                self.stalled = False
+        if self.check_stall(self.v, max(duty_l, duty_r)):
+            return
 
-    # ======================================
-    # UTILS
-    # ======================================
-    def limit(self, v):
-        return max(min(v, MAX_SPEED), -MAX_SPEED)
+        # -------- Drive --------
+
+        self.set_left(vl)
+        self.set_right(vr)
+
+        # -------- Odom --------
+
+        self.publish_odom(self.v, self.w, dt)
+
+    # ======================================================
 
     def destroy_node(self):
+
         self.stop()
         lgpio.gpiochip_close(self.chip)
+
         super().destroy_node()
 
 
-# =========================================
+# ======================================================
+
+
 def main():
+
     rclpy.init()
-    node = DiffDrive()
+
+    node = DiffDriveNode()
+
     try:
         rclpy.spin(node)
+
     except KeyboardInterrupt:
         pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+
+    node.destroy_node()
+    rclpy.shutdown()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
-
