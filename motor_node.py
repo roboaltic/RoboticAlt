@@ -45,7 +45,6 @@ MIN_CMD_SPEED = 0.1
 class DiffDrive(Node):
 
     def __init__(self):
-
         super().__init__('diff_drive_node')
 
         # ---------- GPIO ----------
@@ -97,7 +96,6 @@ class DiffDrive(Node):
     # CMD_VEL
     # ======================================
     def cmd_vel_cb(self, msg):
-
         if self.stalled:
             return
 
@@ -107,16 +105,16 @@ class DiffDrive(Node):
         vl = self.v - self.w * WHEEL_BASE / 2
         vr = self.v + self.w * WHEEL_BASE / 2
 
-        # --------- Правый мотор стартует первым ---------
+        # Правый мотор стартует первым, микрозадержка перед левым
         self.set_right(vr)
-        time.sleep(0.015)  # 15 мс — незаметная микрозадержка
+        time.sleep(0.015)  # 15 мс, незаметно
         self.set_left(vl)
 
     # ======================================
     # MOTOR
     # ======================================
     def set_left(self, speed):
-        fwd = speed >= 0
+        fwd = speed >= 0  # оригинальная логика
         duty = abs(speed) / MAX_SPEED * 100
 
         lgpio.gpio_write(self.chip, IN1, int(fwd))
@@ -125,7 +123,7 @@ class DiffDrive(Node):
         lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, duty)
 
     def set_right(self, speed):
-        fwd = speed >= 0  # направление совпадает с левым мотором
+        fwd = speed >= 0  # оригинальная логика
         duty = abs(speed) / MAX_SPEED * 100
 
         lgpio.gpio_write(self.chip, IN3, int(fwd))
