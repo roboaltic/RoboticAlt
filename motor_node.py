@@ -13,25 +13,33 @@ import math
 
 # ================== GPIO CONFIG ==================
 
-ENA = 18   # PWM Left
+ENA = 18
 IN1 = 23
 IN2 = 24
 
-ENB = 13   # PWM Right
+ENB = 13
 IN3 = 27
 IN4 = 22
 
-PWM_FREQ = 1000  # Hz (SAFE VALUE)
+PWM_FREQ = 1000
+
 
 # ================== ROBOT PARAMS ==================
 
-WHEEL_RADIUS = 0.033     # meters
-WHEEL_BASE = 0.16        # meters
+WHEEL_RADIUS = 0.033
+WHEEL_BASE = 0.16
 
-MAX_LINEAR = 0.25        # m/s
-MAX_ANGULAR = 2.0        # rad/s
+MAX_LINEAR = 0.25
+MAX_ANGULAR = 2.0
 
-CMD_TIMEOUT = 0.5        # seconds
+CMD_TIMEOUT = 0.5
+
+
+# =============== CURRENT PROTECTION ===============
+
+STALL_CURRENT = 1.8      # Амперы (подстрой!)
+STALL_TIME = 0.7         # сек
+RECOVERY_TIME = 2.0      # сек
 
 
 # ==================================================
@@ -58,7 +66,7 @@ class DiffDrive(Node):
             10
         )
 
-        self.timer = self.create_timer(0.05, self.update)  # 20 Hz
+        self.timer = self.create_timer(0.05, self.update)
 
         # GPIO
         self.chip = lgpio.gpiochip_open(0)
@@ -77,6 +85,11 @@ class DiffDrive(Node):
 
         self.last_time = time.time()
 
+        # Protection
+        self.stall_start = None
+        self.emergency = False
+        self.recover_time = 0.0
+
         self.get_logger().info("DiffDrive Ready")
 
 
@@ -87,7 +100,7 @@ class DiffDrive(Node):
         pins = [ENA, IN1, IN2, ENB, IN3, IN4]
 
         for p in pins:
-            lgpio.gpio_claim_output(self.chip, p)
+            lgpio.gpio_claim_output(self.chip, p, 0)
 
         self.stop_motors()
 
@@ -96,10 +109,12 @@ class DiffDrive(Node):
 
     def cmd_cb(self, msg: Twist):
 
+        if self.emergency:
+            return
+
         v = msg.linear.x
         w = msg.angular.z
 
-        # Limit
         v = max(-MAX_LINEAR, min(MAX_LINEAR, v))
         w = max(-MAX_ANGULAR, min(MAX_ANGULAR, w))
 
@@ -111,10 +126,61 @@ class DiffDrive(Node):
 
     # ==================================================
 
+    def check_stall(self):
+
+        current = self.read_motor_current()
+
+        speed = abs(self.v) + abs(self.w)
+
+        now = time.time()
+
+        if speed > 0.05 and current > STALL_CURRENT:
+
+            if self.stall_start is None:
+                self.stall_start = now
+
+            elif now - self.stall_start > STALL_TIME:
+                self.trigger_emergency()
+
+        else:
+            self.stall_start = None
+
+
+    # ==================================================
+
+    def trigger_emergency(self):
+
+        self.emergency = True
+        self.recover_time = time.time() + RECOVERY_TIME
+
+        self.stop_motors()
+
+        self.v = 0.0
+        self.w = 0.0
+
+        self.get_logger().error("🚨 MOTOR STALL → EMERGENCY STOP")
+
+
+    # ==================================================
+
+    def try_recover(self):
+
+        if not self.emergency:
+            return
+
+        if time.time() > self.recover_time:
+
+            self.emergency = False
+            self.stall_start = None
+
+            self.get_logger().info("✅ Emergency released")
+
+
+    # ==================================================
+
     def set_left(self, speed):
 
         duty = int(abs(speed) * 100)
-
         duty = max(0, min(100, duty))
 
         if speed >= 0:
@@ -124,18 +190,12 @@ class DiffDrive(Node):
             lgpio.gpio_write(self.chip, IN1, 0)
             lgpio.gpio_write(self.chip, IN2, 1)
 
-        lgpio.tx_pwm(
-            self.chip,
-            ENA,
-            PWM_FREQ,
-            duty
-        )
+        lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, duty)
 
 
     def set_right(self, speed):
 
         duty = int(abs(speed) * 100)
-
         duty = max(0, min(100, duty))
 
         if speed >= 0:
@@ -145,12 +205,7 @@ class DiffDrive(Node):
             lgpio.gpio_write(self.chip, IN3, 0)
             lgpio.gpio_write(self.chip, IN4, 1)
 
-        lgpio.tx_pwm(
-            self.chip,
-            ENB,
-            PWM_FREQ,
-            duty
-        )
+        lgpio.tx_pwm(self.chip, ENB, PWM_FREQ, duty)
 
 
     # ==================================================
@@ -160,10 +215,8 @@ class DiffDrive(Node):
         lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, 0)
         lgpio.tx_pwm(self.chip, ENB, PWM_FREQ, 0)
 
-        lgpio.gpio_write(self.chip, IN1, 0)
-        lgpio.gpio_write(self.chip, IN2, 0)
-        lgpio.gpio_write(self.chip, IN3, 0)
-        lgpio.gpio_write(self.chip, IN4, 0)
+        for p in [IN1, IN2, IN3, IN4]:
+            lgpio.gpio_write(self.chip, p, 0)
 
 
     # ==================================================
@@ -175,10 +228,19 @@ class DiffDrive(Node):
         self.last_time = now
 
         # -------- WATCHDOG --------
-        if now - self.last_cmd_time > CMD_TIMEOUT:
 
+        if now - self.last_cmd_time > CMD_TIMEOUT:
             self.v = 0.0
             self.w = 0.0
+
+        # -------- PROTECTION --------
+
+        self.check_stall()
+        self.try_recover()
+
+        if self.emergency:
+            return
+
 
         # -------- KINEMATICS --------
 
@@ -192,16 +254,17 @@ class DiffDrive(Node):
             v_l *= k
             v_r *= k
 
-        # Normalize for PWM (0..1)
         left = v_l / MAX_LINEAR
         right = v_r / MAX_LINEAR
+
 
         # -------- MOTORS --------
 
         self.set_left(left)
         self.set_right(right)
 
-        # -------- ODOMETRY --------
+
+        # -------- ODOM --------
 
         v = (v_r + v_l) / 2.0
         w = (v_r - v_l) / WHEEL_BASE
