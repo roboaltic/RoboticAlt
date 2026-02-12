@@ -8,7 +8,7 @@ class CameraNode(Node):
     def __init__(self):
         super().__init__('camera_node')
 
-        # Параметры
+        # Параметри
         self.declare_parameter('device', '/dev/video0')
         self.declare_parameter('fps', 15)
         self.declare_parameter('width', 640)
@@ -52,7 +52,7 @@ class CameraNode(Node):
         msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
         self.pub_raw.publish(msg)
 
-        # Сжатое изображение
+        # Сжате зображення
         _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         msg_compressed = self.bridge.cv2_to_imgmsg(buffer.tobytes(), encoding='jpeg')
         self.pub_compressed.publish(msg_compressed)
