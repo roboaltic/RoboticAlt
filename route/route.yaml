@@ -1,49 +1,31 @@
-steps:
+loop: false
 
-  # 1 forward 4 sec
-  - linear: [0.1, 0.0, 0.0]
+route:
+
+  - name: forward_1
+    mode: time
+    duration: 4.0
+    linear:  [0.1, 0.0, 0.0]
     angular: [0.0, 0.0, 0.0]
-    time: 4
 
-  # 2 curve
-  - linear: [0.09, 0.0, 0.0]
-    angular: [0.0, 0.0, 0.07]
-    time: 3
-
-  # 3 turn
-  - linear: [0.07, 0.0, 0.0]
-    angular: [0.0, 0.0, 1.9]
-    time: 2
-
-  # 4 straight
-  - linear: [0.09, 0.0, 0.0]
-    angular: [0.0, 0.0, 0.07]
-    time: 4
-
-
-  # ===== Added route =====
-
-  # 5 turn left
-  - linear: [-0.09, 0.0, 0.0]
+  - name: left_turn_1
+    mode: once
+    linear:  [-0.09, 0.0, 0.0]
     angular: [0.0, 0.0, -0.19]
-    time: 2
 
-  # 6 forward
-  - linear: [0.1, 0.0, 0.0]
+  - name: forward_2
+    mode: time
+    duration: 1.5
+    linear:  [0.08, 0.0, 0.0]
     angular: [0.0, 0.0, -0.05]
-    time: 4
 
-  # 7 forward slow
-  - linear: [0.08, 0.0, 0.0]
-    angular: [0.0, 0.0, -0.05]
-    time: 1.5
-
-  # 8 turn left
-  - linear: [-0.09, 0.0, 0.0]
+  - name: left_turn_2
+    mode: once
+    linear:  [-0.09, 0.0, 0.0]
     angular: [0.0, 0.0, -0.19]
-    time: 2
 
-  # 9 forward
-  - linear: [0.1, 0.0, 0.0]
+  - name: finish
+    mode: time
+    duration: 2.0
+    linear:  [0.1, 0.0, 0.0]
     angular: [0.0, 0.0, 0.0]
-    time: 2
