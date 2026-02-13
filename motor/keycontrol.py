@@ -9,8 +9,8 @@ import tty
 import select
 
 # Настройки скорости
-LINEAR_STEP = -0.11
-ANGULAR_STEP = 0.03
+LINEAR_STEP = 0.05
+ANGULAR_STEP = 0.2
 MAX_LINEAR = 0.25
 MAX_ANGULAR = 2.0
 
@@ -26,7 +26,10 @@ class KeyboardTeleop(Node):
         self.v = 0.0
         self.w = 0.0
 
-        self.get_logger().info("Keyboard Teleop Ready. Use WASD for motion, QE for rotation. Ctrl-C to exit.")
+        self.get_logger().info(
+            "Keyboard Teleop Ready:\n"
+            "W/S: вперед/назад, A/D: поворот, Z/C: разворот на месте, Q: стоп"
+        )
 
         # Настройка терминала для неблокирующего ввода
         self.settings = termios.tcgetattr(sys.stdin)
@@ -47,7 +50,7 @@ class KeyboardTeleop(Node):
         key = self.get_key()
         twist = Twist()
 
-        # Управление клавишами
+        # ===== Управление =====
         if key.lower() == 'w':
             self.v += LINEAR_STEP
         elif key.lower() == 's':
@@ -56,7 +59,13 @@ class KeyboardTeleop(Node):
             self.w += ANGULAR_STEP
         elif key.lower() == 'd':
             self.w -= ANGULAR_STEP
-        elif key.lower() == 'q':
+        elif key.lower() == 'z':  # разворот на месте влево
+            self.v = 0.0
+            self.w = MAX_ANGULAR
+        elif key.lower() == 'c':  # разворот на месте вправо
+            self.v = 0.0
+            self.w = -MAX_ANGULAR
+        elif key.lower() == 'q':  # стоп
             self.v = 0.0
             self.w = 0.0
         elif key == '\x03':  # Ctrl-C
@@ -68,9 +77,11 @@ class KeyboardTeleop(Node):
         self.v = max(-MAX_LINEAR, min(MAX_LINEAR, self.v))
         self.w = max(-MAX_ANGULAR, min(MAX_ANGULAR, self.w))
 
+        # Формируем Twist
         twist.linear.x = self.v
         twist.angular.z = self.w
 
+        # Публикуем команду
         self.pub.publish(twist)
 
 
