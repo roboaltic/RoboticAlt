@@ -2,124 +2,147 @@
 
 import rclpy
 from rclpy.node import Node
-
 from geometry_msgs.msg import Twist
 
 import yaml
+import sys
 import time
-import os
+import signal
 
 
 class RouteExecutor(Node):
 
-    def __init__(self):
-        super().__init__('route_executor')
+    def __init__(self, route_file):
 
-        self.publisher = self.create_publisher(
-            Twist,
-            '/cmd_vel',
-            10
-        )
-
-        # Path to route file
-        self.route_file = os.path.expanduser(
-            '~/ros2_ws/routes/route.yaml'
-        )
-
-        self.steps = self.load_route()
-
-        self.current_step = 0
-        self.step_start = time.time()
-
-        self.timer = self.create_timer(
-            0.05,
-            self.update
-        )
+        super().__init__("route_executor")
 
         self.get_logger().info("Route Executor started")
 
+        # Publisher
+        self.cmd_pub = self.create_publisher(
+            Twist,
+            "/cmd_vel",
+            10
+        )
 
-    # =============================
+        # Load route
+        self.load_route(route_file)
 
-    def load_route(self):
+        # Ctrl+C handler
+        signal.signal(signal.SIGINT, self.stop_robot)
 
-        if not os.path.exists(self.route_file):
-            self.get_logger().error(
-                f"Route file not found: {self.route_file}"
-            )
-            return []
+        # Start route
+        self.run_route()
 
-        with open(self.route_file, 'r') as f:
+
+    # ---------------- LOAD YAML ----------------
+
+    def load_route(self, file):
+
+        with open(file, "r") as f:
             data = yaml.safe_load(f)
 
-        return data.get('steps', [])
+        self.loop = data.get("loop", False)
+        self.route = data["route"]
+
+        self.get_logger().info(
+            f"Loaded {len(self.route)} steps | loop={self.loop}"
+        )
 
 
-    # =============================
+    # ---------------- EXEC STEP ----------------
 
-    def update(self):
-
-        if self.current_step >= len(self.steps):
-
-            self.stop_robot()
-            self.get_logger().info("Route finished")
-            rclpy.shutdown()
-            return
-
-
-        step = self.steps[self.current_step]
-
-        duration = step['time']
-
-        now = time.time()
-
-        if now - self.step_start >= duration:
-
-            self.current_step += 1
-            self.step_start = now
-            return
-
+    def execute_step(self, step):
 
         msg = Twist()
 
-        msg.linear.x = step['linear'][0]
-        msg.linear.y = step['linear'][1]
-        msg.linear.z = step['linear'][2]
+        msg.linear.x  = float(step["linear"][0])
+        msg.linear.y  = float(step["linear"][1])
+        msg.linear.z  = float(step["linear"][2])
 
-        msg.angular.x = step['angular'][0]
-        msg.angular.y = step['angular'][1]
-        msg.angular.z = step['angular'][2]
+        msg.angular.x = float(step["angular"][0])
+        msg.angular.y = float(step["angular"][1])
+        msg.angular.z = float(step["angular"][2])
 
-        self.publisher.publish(msg)
+        mode = step["mode"]
+
+        self.get_logger().info(f"Step: {step['name']} ({mode})")
 
 
-    # =============================
+        # -------- TIME MODE --------
+        if mode == "time":
 
-    def stop_robot(self):
+            duration = float(step["duration"])
+            start = time.time()
+
+            while time.time() - start < duration:
+
+                self.cmd_pub.publish(msg)
+                time.sleep(0.05)
+
+
+        # -------- ONCE MODE --------
+        elif mode == "once":
+
+            self.cmd_pub.publish(msg)
+            time.sleep(0.3)
+
+
+    # ---------------- MAIN LOOP ----------------
+
+    def run_route(self):
+
+        time.sleep(1.0)
+
+        while rclpy.ok():
+
+            for step in self.route:
+
+                self.execute_step(step)
+
+            if not self.loop:
+                break
+
+        self.stop_motion()
+        self.get_logger().info("Route finished")
+
+
+    # ---------------- STOP ----------------
+
+    def stop_motion(self):
 
         msg = Twist()
-        self.publisher.publish(msg)
+        self.cmd_pub.publish(msg)
 
 
+    def stop_robot(self, sig, frame):
+
+        self.get_logger().warn("Stopping robot")
+
+        self.stop_motion()
+        rclpy.shutdown()
+        sys.exit(0)
+
+
+
+# ================= MAIN =====================
 
 def main():
 
     rclpy.init()
 
-    node = RouteExecutor()
+    if len(sys.argv) < 2:
 
-    try:
-        rclpy.spin(node)
+        print("Usage:")
+        print("ros2 run route_executor route_node.py route.yaml")
+        return
 
-    except KeyboardInterrupt:
-        pass
+    route_file = sys.argv[1]
 
-    finally:
-        node.stop_robot()
-        node.destroy_node()
-        rclpy.shutdown()
+    node = RouteExecutor(route_file)
 
+    rclpy.spin(node)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
