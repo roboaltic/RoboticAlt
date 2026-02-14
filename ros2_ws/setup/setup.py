@@ -13,7 +13,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'),
-            glob('launch/*.py')),  # <-- вот этот момент
+            glob('launch/*.py')), 
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'motor_node = diff_drive_l298n.motor_node:main'
+            'camera_node = camera_driver.camera_node:main'
         ],
     },
 )
