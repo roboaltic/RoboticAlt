@@ -24,7 +24,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            ' = diff_drive_l298n.motor_node:main'
+            'keycontor = diff_drive_l298n.keyboard_teleop_node:main'
         ],
     },
 )
