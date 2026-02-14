@@ -4,8 +4,6 @@
 
 Даний проєкт реалізує програмно-апаратний комплекс керування мобільною роботизованою платформою з використанням фреймворку ROS 2. Система забезпечує взаємодію між обчислювальним модулем Raspberry Pi, драйверами двигунів постійного струму, камерою та програмними вузлами керування.
 
-Основною метою проєкту є створення стабільного середовища для управління рухом робота, отримання відеопотоку з камери, а також організація взаємодії між компонентами через стандартизовані ROS 2-топіки та механізми QoS.
-
 ---
 
 ## Програмне та апаратне забезпечення
@@ -117,7 +115,7 @@ source ~/ros2_ws/install/setup.bash
 
 ### Запуск через launch-файл
 
-ros2 launch robot_control robot_launch.py
+ros2 launch robot_bringup system.launch.py
 
 У цьому режимі автоматично активуються всі основні вузли.
 
@@ -127,11 +125,11 @@ ros2 launch robot_control robot_launch.py
 
 Запуск керування двигунами:
 
-ros2 run robot_control motor_node.py
+ros2 run diff_drive_l298n motor_node.py
 
 Запуск камери:
 
-ros2 run robot_control camera_node.py
+ros2 run camera_driver camera_node.py
 
 ---
 
@@ -141,19 +139,19 @@ ros2 run robot_control camera_node.py
 
 Приклад команди руху вперед:
 
-ros2 topic pub /cmd_vel geometry_msgs/Twist "{linear: {x: 0.2}, angular: {z: 0.0}}"
+ros2 topic pub /cmd_vel geometry_msgs/Twist "{linear: {x: 0.11, y: 0.0, z: 0.0}, angular: {x:0.0, y; 0.0, z: 0.0}}"
 
 Приклад повороту:
 
-ros2 topic pub /cmd_vel geometry_msgs/Twist "{linear: {x: 0.0}, angular: {z: 0.5}}"
+ros2 topic pub /cmd_vel geometry_msgs/Twist "{linear: {x: 0.2, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.19}}"
 
 Приклад розвороту на місці:
 
-ros2 topic pub /cmd_vel geometry_msgs/Twist "{linear: {x: 0.0}, angular: {z: 1.0}}"
+ros2 topic pub /cmd_vel geometry_msgs/Twist "{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.2, y: 0.0, z: 2.0}}"
 
 Зупинка руху:
 
-ros2 topic pub /cmd_vel geometry_msgs/Twist "{linear: {x: 0.0}, angular: {z: 0.0}}"
+ros2 topic pub /cmd_vel geometry_msgs/Twist "{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
 
 Для аварійної зупинки використовувати комбінацію `Ctrl + C`.
 
@@ -168,7 +166,7 @@ http://192.168.*.*(ip RPi)
 ---
 ## Діагностика та налагодження
 
-Для перевірки стану системи рекомендується використовувати стандартні інструменти ROS 2.
+Для перевірки стану системи рекомендуються стандартні інструменти ROS 2.
 
 Перегляд активних вузлів:
 
