@@ -1,1 +1,1 @@
-Eldar(KSM-22)
+Eldar Shamsudinov(KSM-22)
