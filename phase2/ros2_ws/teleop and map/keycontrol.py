@@ -1,104 +1,187 @@
 #!/usr/bin/env python3
 
-import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import Twist
-import sys
-import termios
-import tty
-import select
+# ================= ІМПОРТИ =================
 
-# Настройки скорости
-LINEAR_STEP = 0.05
+import rclpy                         # Основна бібліотека ROS2
+from rclpy.node import Node          # Базовий клас для ноди
+
+from geometry_msgs.msg import Twist # Повідомлення для керування швидкістю
+
+import sys                           # Доступ до stdin
+import termios                       # Налаштування терміналу (Linux)
+import tty                           # Raw-режим клавіатури
+import select                        # Неблокуюче читання
+
+
+# ================= НАЛАШТУВАННЯ ШВИДКОСТІ =================
+
+LINEAR_STEP = 0.055
 ANGULAR_STEP = 0.2
 MAX_LINEAR = 0.25
 MAX_ANGULAR = 2.0
 
+
 # ========================================
 
+
+# Нода для керування роботом з клавіатури
 class KeyboardTeleop(Node):
+
     def __init__(self):
         super().__init__('keyboard_teleop_node')
-
-        # Publisher на /cmd_vel
-        self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
-
-        self.v = 0.0
-        self.w = 0.0
-
-        self.get_logger().info(
-            "Keyboard Teleop Ready:\n"
-            "W/S: вперед/назад, A/D: поворот, Z/C: разворот на месте, Q: стоп"
+        self.pub = self.create_publisher(
+            Twist,
+            '/cmd_vel',
+            10
         )
 
-        # Настройка терминала для неблокирующего ввода
+        # Поточні швидкості
+        self.v = 0.0   # лінійна
+        self.w = 0.0   # кутова
+
+        # Інструкція для користувача
+        self.get_logger().info(
+            "Keyboard Teleop Ready:\n"
+            "W/S: вперед/назад\n"
+            "A/D: поворот\n"
+            "Z/C: розворот на місці\n"
+            "Q: стоп"
+        )
+
+        # Збереження поточних налаштувань терміналу
         self.settings = termios.tcgetattr(sys.stdin)
 
-        self.timer = self.create_timer(0.05, self.update)  # 20Hz публикация
+        # Таймер оновлення (20 Гц)
+        self.timer = self.create_timer(
+            0.05,
+            self.update
+        )
+
+
+    # ========================================
+    # Зчитування клавіші без блокування
 
     def get_key(self):
-        """Возвращает нажатую клавишу без блокировки"""
+        """
+        Повертає натиснуту клавішу без блокування програми
+        """
+
+        # Переводимо термінал у raw-режим
         tty.setraw(sys.stdin.fileno())
-        rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+
+        # Перевіряємо, чи є введення
+        rlist, _, _ = select.select(
+            [sys.stdin],
+            [],
+            [],
+            0.1
+        )
+
         key = ''
+
         if rlist:
             key = sys.stdin.read(1)
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
+            if key == '\x1b':
+                key += sys.stdin.read(2)
+
+        # Повертаємо стандартні налаштування терміналу
+        termios.tcsetattr(
+            sys.stdin,
+            termios.TCSADRAIN,
+            self.settings
+        )
+
         return key
 
+
+    # ========================================
+    # Головний цикл керування
+
     def update(self):
+
+        # Отримуємо натиснуту клавішу
         key = self.get_key()
+
+        # Створюємо повідомлення Twist
         twist = Twist()
 
-        # ===== Управление =====
-        if key.lower() == 'w':
-            self.v += LINEAR_STEP
-        elif key.lower() == 's':
+
+        # ========== КЕРУВАННЯ ==========
+
+        if key.lower() == '\x1b[Aa':          # Вперед
             self.v -= LINEAR_STEP
-        elif key.lower() == 'a':
+
+        elif key.lower() == '\x1b[B':        # Назад
+            self.v += LINEAR_STEP
+
+        elif key.lower() == '\x1b[C':        # Поворот вліво
             self.w += ANGULAR_STEP
-        elif key.lower() == 'd':
+
+        elif key.lower() == '\x1b[D':        # Поворот вправо
             self.w -= ANGULAR_STEP
-        elif key.lower() == 'z':  # разворот на месте влево
+
+        elif key.lower() == 'z':        # Розворот вліво на місці
             self.v = 0.0
             self.w = MAX_ANGULAR
-        elif key.lower() == 'c':  # разворот на месте вправо
+
+        elif key.lower() == 'c':        # Розворот вправо на місці
             self.v = 0.0
             self.w = -MAX_ANGULAR
-        elif key.lower() == 'q':  # стоп
+
+        elif key.lower() == 'q':        # Стоп
             self.v = 0.0
             self.w = 0.0
-        elif key == '\x03':  # Ctrl-C
+
+        elif key == '\x03':             # Ctrl + C
             self.get_logger().info("Exiting Teleop")
             rclpy.shutdown()
             return
 
-        # Ограничения
-        self.v = max(-MAX_LINEAR, min(MAX_LINEAR, self.v))
-        self.w = max(-MAX_ANGULAR, min(MAX_ANGULAR, self.w))
 
-        # Формируем Twist
+        # ========== ОБМЕЖЕННЯ ШВИДКОСТІ ==========
+
+        self.v = max(-MAX_LINEAR,
+                     min(MAX_LINEAR, self.v))
+
+        self.w = max(-MAX_ANGULAR,
+                     min(MAX_ANGULAR, self.w))
+
+
+        # ========== ФОРМУВАННЯ Twist ==========
+
         twist.linear.x = self.v
         twist.angular.z = self.w
 
-        # Публикуем команду
+
+        # ========== ПУБЛІКАЦІЯ ==========
+
         self.pub.publish(twist)
 
 
 # ========================================
+# MAIN
 
 def main():
+
+    # Ініціалізація ROS2
     rclpy.init()
+
+    # Створення ноди
     node = KeyboardTeleop()
 
     try:
+        # Запуск
         rclpy.spin(node)
+
     except KeyboardInterrupt:
         pass
+
     finally:
+        # Коректне завершення
         node.destroy_node()
         rclpy.shutdown()
 
 
+# Точка входу
 if __name__ == '__main__':
     main()
