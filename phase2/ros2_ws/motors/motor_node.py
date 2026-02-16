@@ -53,10 +53,8 @@ CMD_TIMEOUT = 0.5
 class DiffDrive(Node):
 
     def __init__(self):
-
-        # Ініціалізація ноди
         super().__init__('diff_drive_node')
-
+        
         self.get_logger().info("Starting DiffDrive (lgpio / chip4)")
 
 
@@ -86,7 +84,6 @@ class DiffDrive(Node):
         # Відкриваємо GPIO-чіп №4 (для RPi5)
         self.chip = lgpio.gpiochip_open(4)
 
-        # Налаштовуємо піни
         self.setup_gpio()
 
 
