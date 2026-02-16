@@ -108,7 +108,7 @@ class KeyboardTeleop(Node):
 
         # ========== КЕРУВАННЯ ==========
 
-        if key.lower() == '\x1b[Aa':          # Вперед
+        if key.lower() == '\x1b[A':          # Вперед
             self.v -= LINEAR_STEP
 
         elif key.lower() == '\x1b[B':        # Назад
