@@ -4,8 +4,8 @@ from launch_ros.actions import Node
 def generate_launch_description():
     return LaunchDescription([
         Node(
-            package='diff_drive_l298n',
-            executable='diff_drive_node',
+            package='sample',
+            executable='sample_node',
             output='screen'
         )
     ])
