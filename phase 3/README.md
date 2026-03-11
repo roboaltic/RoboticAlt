@@ -1,5 +1,6 @@
 Eldar Shamsudinov(KSM-22)
-#  Комп’ютери та мережа - (Ubuntu + ROS2)2
+#  Комп’ютери та мережа - (Ubuntu + ROS2)
+
 
 ##  Про проєкт
 
