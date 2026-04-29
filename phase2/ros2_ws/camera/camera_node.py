@@ -9,7 +9,7 @@ class CameraNode(Node):
     def __init__(self):
         super().__init__('camera_node')
 
-        self.declare_parameter('device', '/dev/video2')
+        self.declare_parameter('device', '/dev/video0')
         self.declare_parameter('fps', 15)
         self.declare_parameter('width', 640)
         self.declare_parameter('height', 480)
