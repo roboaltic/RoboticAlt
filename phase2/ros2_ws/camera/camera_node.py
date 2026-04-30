@@ -29,7 +29,8 @@ class CameraNode(Node):
 
         # Ініціалізація наших модулів комп'ютерного зору
         self.crack_detector = CrackDetector()
-        self.edge_detector = ObjectEdgeDetector(min_area=2000) # Шукаємо контури > 2000px
+       # Шукаємо об'єкти від 2000 до 80000 пікселів
+        self.edge_detector = ObjectEdgeDetector(min_area=2000, max_area=80000)
 
         self.cap = cv2.VideoCapture(device)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
