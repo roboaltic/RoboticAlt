@@ -11,18 +11,22 @@ import time
 import math
 
 
-ENA = 18
-IN1 = 23
-IN2 = 24
+ENA = 17
+IN1 = 27
+IN2 = 22
 
 ENB = 13
-IN3 = 27
-IN4 = 22
+IN3 = 26
+IN4 = 19
 
 PWM_FREQ = 1000
 
+# Мінімальна потужність PWM у %
+# Якщо мотори пищать, але не рушають — підніми до 55 або 65
+MIN_PWM = 45
+
 WHEEL_BASE = 0.16
-MAX_LINEAR = 0.25
+MAX_LINEAR = 1.0
 MAX_ANGULAR = 2.0
 
 CMD_TIMEOUT = 0.5
@@ -79,9 +83,17 @@ class DiffDrive(Node):
         self.w = max(-MAX_ANGULAR, min(MAX_ANGULAR, msg.angular.z))
         self.last_cmd = time.time()
 
-    def set_left(self, s):
+    def pwm_from_speed(self, s):
         duty = int(abs(s) * 100)
+
+        if duty > 0:
+            duty = max(MIN_PWM, duty)
+
         duty = max(0, min(100, duty))
+        return duty
+
+    def set_left(self, s):
+        duty = self.pwm_from_speed(s)
 
         if s > 0:
             lgpio.gpio_write(self.chip, IN1, 1)
@@ -96,8 +108,7 @@ class DiffDrive(Node):
         lgpio.tx_pwm(self.chip, ENA, PWM_FREQ, duty)
 
     def set_right(self, s):
-        duty = int(abs(s) * 100)
-        duty = max(0, min(100, duty))
+        duty = self.pwm_from_speed(s)
 
         if s > 0:
             lgpio.gpio_write(self.chip, IN3, 1)
