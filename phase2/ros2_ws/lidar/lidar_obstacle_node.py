@@ -27,10 +27,6 @@ class LidarObstacleNode(Node):
         self.declare_parameter('turn_speed', 0.75)
         self.declare_parameter('wall_follow_speed', 0.09)
 
-        # компенсація правого двигуна
-        # для прямого руху: x=0.11, z=-0.07
-        self.declare_parameter('forward_angular_compensation', -0.07)
-
         self.declare_parameter('obstacle_dist', 0.55)
         self.declare_parameter('clear_dist', 0.85)
         self.declare_parameter('side_desired_dist', 0.30)
@@ -48,9 +44,6 @@ class LidarObstacleNode(Node):
         self.forward_speed = float(self.get_parameter('forward_speed').value)
         self.turn_speed = float(self.get_parameter('turn_speed').value)
         self.wall_follow_speed = float(self.get_parameter('wall_follow_speed').value)
-        self.forward_angular_comp = float(
-            self.get_parameter('forward_angular_compensation').value
-        )
 
         self.obstacle_dist = float(self.get_parameter('obstacle_dist').value)
         self.clear_dist = float(self.get_parameter('clear_dist').value)
@@ -87,8 +80,7 @@ class LidarObstacleNode(Node):
 
         self.get_logger().info('Lidar obstacle avoidance node started.')
         self.get_logger().info(
-            f'Forward command: x={self.forward_speed:.2f}, '
-            f'z={self.forward_angular_comp:.2f}'
+            f'Forward command: x={self.forward_speed:.2f}, z=0.00'
         )
 
     def scan_callback(self, msg: LaserScan):
@@ -114,8 +106,6 @@ class LidarObstacleNode(Node):
             return float('inf')
 
         values.sort()
-
-        # не беремо абсолютно мінімальну точку, бо вона може бути шумом
         index = max(0, min(len(values) - 1, int(len(values) * 0.1)))
         return values[index]
 
@@ -139,10 +129,9 @@ class LidarObstacleNode(Node):
         msg.angular.z = float(angular_z)
         self.cmd_pub.publish(msg)
 
-    def publish_forward_compensated(self, linear_x, extra_angular_z=0.0):
-        angular = self.forward_angular_comp + extra_angular_z
-        angular = max(min(angular, 1.5), -1.5)
-        self.publish_cmd(linear_x, angular)
+    def publish_forward(self, linear_x, angular_z=0.0):
+        angular_z = max(min(angular_z, 1.5), -1.5)
+        self.publish_cmd(linear_x, angular_z)
 
     def stop_robot(self):
         self.publish_cmd(0.0, 0.0)
@@ -177,56 +166,37 @@ class LidarObstacleNode(Node):
                     self.avoid_side = 'left'
                     self.state = State.TURN_LEFT
                     self.turn_start_time = self.now_sec()
-                    self.get_logger().info(
-                        f'Obstacle ahead. Turning LEFT. '
-                        f'front={front:.2f}, left={left:.2f}, right={right:.2f}'
-                    )
                 else:
                     self.avoid_side = 'right'
                     self.state = State.TURN_RIGHT
                     self.turn_start_time = self.now_sec()
-                    self.get_logger().info(
-                        f'Obstacle ahead. Turning RIGHT. '
-                        f'front={front:.2f}, left={left:.2f}, right={right:.2f}'
-                    )
 
                 self.exit_counter = 0
                 self.stop_robot()
                 return
 
-            self.publish_forward_compensated(self.forward_speed, 0.0)
+            self.publish_forward(self.forward_speed, 0.0)
             return
 
         if self.state == State.TURN_LEFT:
-            self.log_state_once('State: TURN_LEFT')
-
             self.publish_cmd(0.03, self.turn_speed)
 
             if front > self.clear_dist and front_left > self.clear_dist * 0.8:
                 self.turn_duration = self.now_sec() - self.turn_start_time
                 self.state = State.FOLLOW_WALL
                 self.exit_counter = 0
-                self.get_logger().info(
-                    f'Finished LEFT turn. Duration={self.turn_duration:.2f}s.'
-                )
             return
 
         if self.state == State.TURN_RIGHT:
-            self.log_state_once('State: TURN_RIGHT')
-
             self.publish_cmd(0.03, -self.turn_speed)
 
             if front > self.clear_dist and front_right > self.clear_dist * 0.8:
                 self.turn_duration = self.now_sec() - self.turn_start_time
                 self.state = State.FOLLOW_WALL
                 self.exit_counter = 0
-                self.get_logger().info(
-                    f'Finished RIGHT turn. Duration={self.turn_duration:.2f}s.'
-                )
             return
 
         if self.state == State.FOLLOW_WALL:
-            self.log_state_once(f'State: FOLLOW_WALL ({self.avoid_side})')
 
             if front < self.obstacle_dist * 0.8:
                 if self.avoid_side == 'left':
@@ -248,7 +218,7 @@ class LidarObstacleNode(Node):
 
             wall_correction = max(min(wall_correction, 1.0), -1.0)
 
-            self.publish_forward_compensated(
+            self.publish_forward(
                 self.wall_follow_speed,
                 wall_correction
             )
@@ -261,14 +231,9 @@ class LidarObstacleNode(Node):
             if self.exit_counter >= self.exit_confirm_cycles:
                 self.state = State.RETURN_HEADING
                 self.return_start_time = self.now_sec()
-                self.get_logger().info(
-                    f'Exit detected. Returning heading. '
-                    f'turn_duration={self.turn_duration:.2f}s'
-                )
             return
 
         if self.state == State.RETURN_HEADING:
-            self.log_state_once('State: RETURN_HEADING')
 
             return_duration = self.turn_duration * self.return_gain
             elapsed = self.now_sec() - self.return_start_time
@@ -281,8 +246,7 @@ class LidarObstacleNode(Node):
             else:
                 self.state = State.FORWARD
                 self.exit_counter = 0
-                self.get_logger().info('Return completed. Back to FORWARD.')
-                self.publish_forward_compensated(self.forward_speed, 0.0)
+                self.publish_forward(self.forward_speed, 0.0)
 
     def destroy_node(self):
         self.stop_robot()
@@ -305,4 +269,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-  
