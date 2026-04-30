@@ -1,7 +1,9 @@
 import rclpy
 from rclpy.node import Node
+
 import serial
 import math
+
 from sensor_msgs.msg import LaserScan
 
 
@@ -13,7 +15,7 @@ class LD06Node(Node):
         self.declare_parameter('baudrate', 230400)
 
         port = self.get_parameter('port').value
-        baud = self.get_parameter('baudrate').value
+        baud = int(self.get_parameter('baudrate').value)
 
         self.ser = serial.Serial(port, baud, timeout=1)
 
@@ -27,6 +29,7 @@ class LD06Node(Node):
 
     def read_data(self):
         data = self.ser.read(256)
+
         if data:
             self.buffer.extend(data)
             self.parse_packets()
@@ -83,7 +86,11 @@ class LD06Node(Node):
 
         msg.angle_min = min(angles)
         msg.angle_max = max(angles)
-        msg.angle_increment = (msg.angle_max - msg.angle_min) / max(len(angles) - 1, 1)
+
+        if len(angles) > 1:
+            msg.angle_increment = (msg.angle_max - msg.angle_min) / (len(angles) - 1)
+        else:
+            msg.angle_increment = 0.0
 
         msg.range_min = 0.02
         msg.range_max = 8.0
@@ -92,18 +99,24 @@ class LD06Node(Node):
 
         self.publisher.publish(msg)
 
+    def destroy_node(self):
+        if self.ser and self.ser.is_open:
+            self.ser.close()
 
-def main():
-    rclpy.init()
+        super().destroy_node()
+
+
+def main(args=None):
+    rclpy.init(args=args)
     node = LD06Node()
 
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
