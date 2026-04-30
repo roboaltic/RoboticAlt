@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from camera.crack_detector import CrackDetector  # Використовуємо правильну назву вашого пакету
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -28,6 +29,9 @@ class CameraNode(Node):
         self.aruco_parameters.adaptiveThreshConstant = 7
         self.aruco_parameters.minMarkerPerimeterRate = 0.03
 
+        # Ініціалізація детектора тріщин
+        self.crack_detector = CrackDetector(min_crack_area=200)
+
         # Відкриття камери
         self.cap = cv2.VideoCapture(device)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -44,7 +48,7 @@ class CameraNode(Node):
 
         # Таймер оновлення кадрів
         self.timer = self.create_timer(1.0 / fps, self.timer_callback)
-        self.get_logger().info("✅ CameraNode запущена (Режим обмеженої зони сканування + Логи по центру)")
+        self.get_logger().info("✅ CameraNode запущена (ArUco + Детектор тріщин)")
 
     def timer_callback(self):
         ret, frame = self.cap.read()
@@ -55,7 +59,7 @@ class CameraNode(Node):
         center_f_x = width // 2
         center_f_y = height // 2
 
-        # === НАЛАШТУВАННЯ ЗОНИ СКАНУВАННЯ (ROI) ===
+        # === НАЛАШТУВАННЯ ЗОНИ СКАНУВАННЯ ARUCO (ROI) ===
         # Беремо 50% від ширини та висоти екрану по центру
         roi_w = width // 2
         roi_h = height // 2
@@ -76,7 +80,7 @@ class CameraNode(Node):
         roi_frame = frame[y1:y2, x1:x2]
         gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
         
-        # Скануємо ТІЛЬКИ вирізану зону
+        # Скануємо ТІЛЬКИ вирізану зону на наявність ArUco
         corners, ids, rejected = aruco.detectMarkers(gray, self.aruco_dictionary, parameters=self.aruco_parameters)
 
         if ids is not None:
@@ -112,6 +116,39 @@ class CameraNode(Node):
                         f"🎯 ЦІЛЬ ЗАХОПЛЕНО! Marker {ids[i][0]} в центрі (X: {offset_x}, Y: {offset_y})",
                         throttle_duration_sec=1.0
                     )
+
+        # ==========================================
+        # === ПОШУК ТРІЩИН У СТРОГО ВИДІЛЕНІЙ ЗОНІ (ROI) ===
+        
+        # 1. Задаємо розміри зони аналізу (наприклад, ширина 400, висота 300 у центрі)
+        # Ви можете змінювати ці цифри під ваші потреби!
+        scan_w = 400
+        scan_h = 300
+        
+        c_x1 = center_f_x - (scan_w // 2)
+        c_y1 = center_f_y - (scan_h // 2)
+        c_x2 = center_f_x + (scan_w // 2)
+        c_y2 = center_f_y + (scan_h // 2)
+
+        # 2. Малюємо фіолетову рамку "Зони сканування"
+        cv2.rectangle(frame, (c_x1, c_y1), (c_x2, c_y2), (255, 0, 255), 2)
+        cv2.putText(frame, "CRACK SCAN ZONE", (c_x1, c_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+
+        # 3. Вирізаємо цей шматок зображення
+        crack_roi = frame[c_y1:c_y2, c_x1:c_x2]
+
+        # 4. Відправляємо в детектор ТІЛЬКИ вирізаний шматок!
+        processed_roi, is_crack_detected, crack_count = self.crack_detector.detect(crack_roi)
+
+        # 5. Вставляємо оброблений шматок (з намальованими тріщинами) назад у загальний кадр
+        frame[c_y1:c_y2, c_x1:c_x2] = processed_roi
+
+        if is_crack_detected:
+            self.get_logger().warn(
+                f"⚠️ Увага: Виявлено {crack_count} тріщин(у) в зоні інспекції!",
+                throttle_duration_sec=2.0
+            )
+        # ==========================================
 
         # Показуємо вікно відлагодження
         cv2.imshow("ArUco Debug", frame)
