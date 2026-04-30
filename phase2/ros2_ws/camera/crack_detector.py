@@ -40,39 +40,38 @@ class CrackDetector:
         return result_frame, crack_found, crack_count
 
 class ObjectEdgeDetector:
-    def __init__(self, min_area=8000):
-        # Шукаємо тільки великі об'єкти (коробки, аркуші, перешкоди)
+    def __init__(self, min_area=3000):
         self.min_area = min_area
 
     def detect(self, frame):
         result_frame = frame.copy()
         
-        # 1. Ч/Б та розмиття
+        # 1. Ч/Б та сильне розмиття (щоб ігнорувати дрібні деталі всередині об'єкта)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (7, 7), 0)
+        blur = cv2.GaussianBlur(gray, (11, 11), 0)
         
-        # 2. Пошук різких країв за алгоритмом Canny
-        edges = cv2.Canny(blur, 50, 150)
+        # 2. Пошук країв Canny
+        edges = cv2.Canny(blur, 30, 100)
         
-        # 3. Потовщення ліній, щоб контур об'єкта не розривався
-        kernel = np.ones((5, 5), np.uint8)
-        dilated_edges = cv2.dilate(edges, kernel, iterations=1)
+        # 3. Закриваємо розриви (робимо контур суцільним)
+        # Ядро 9x9 потужно "зшиває" лінії об'єкта
+        kernel = np.ones((9, 9), np.uint8)
+        closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
         
-        # 4. Пошук зовнішніх контурів
-        contours, _ = cv2.findContours(dilated_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # 4. RETR_EXTERNAL - НАЙГОЛОВНІШЕ! Бере ТІЛЬКИ зовнішній, крайній силуэт
+        contours, _ = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area > self.min_area:
-                # Апроксимація контуру (робить лінії більш прямими, ідеально для коробок/кутів)
-                epsilon = 0.02 * cv2.arcLength(cnt, True)
+                # Згладжуємо контур
+                epsilon = 0.01 * cv2.arcLength(cnt, True)
                 approx = cv2.approxPolyDP(cnt, epsilon, True)
                 
-                # Малюємо товстий синій контур навколо знайденого об'єкта
+                # Малюємо синім кольором
                 cv2.drawContours(result_frame, [approx], -1, (255, 0, 0), 3)
                 
-                # Додаємо підпис
                 x, y, w, h = cv2.boundingRect(approx)
-                cv2.putText(result_frame, "OBJECT EDGE", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                cv2.putText(result_frame, "OUTER EDGE", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
                 
         return result_frame

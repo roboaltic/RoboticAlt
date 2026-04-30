@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from camera.crack_detector import CrackDetector  # Використовуємо правильну назву вашого пакету
+from camera.crack_detector import CrackDetector, ObjectEdgeDetector
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -12,7 +12,6 @@ class CameraNode(Node):
     def __init__(self):
         super().__init__('camera_node')
 
-        # Оголошення параметрів ROS 2
         self.declare_parameter('device', '/dev/video2')
         self.declare_parameter('fps', 15)
         self.declare_parameter('width', 640)
@@ -23,16 +22,15 @@ class CameraNode(Node):
         width = self.get_parameter('width').get_parameter_value().integer_value
         height = self.get_parameter('height').get_parameter_value().integer_value
         
-        # Налаштування ArUco
         self.aruco_dictionary = aruco.Dictionary_get(aruco.DICT_ARUCO_ORIGINAL)
         self.aruco_parameters = aruco.DetectorParameters_create()
         self.aruco_parameters.adaptiveThreshConstant = 7
         self.aruco_parameters.minMarkerPerimeterRate = 0.03
 
-        # Ініціалізація детектора тріщин
-        self.crack_detector = CrackDetector(min_crack_area=200)
+        # Ініціалізація наших модулів комп'ютерного зору
+        self.crack_detector = CrackDetector()
+        self.edge_detector = ObjectEdgeDetector(min_area=2000) # Шукаємо контури > 2000px
 
-        # Відкриття камери
         self.cap = cv2.VideoCapture(device)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
@@ -46,21 +44,23 @@ class CameraNode(Node):
         self.pub_raw = self.create_publisher(Image, '/image_raw', QoSProfile(depth=10))
         self.bridge = CvBridge()
 
-        # Таймер оновлення кадрів
         self.timer = self.create_timer(1.0 / fps, self.timer_callback)
-        self.get_logger().info("✅ CameraNode запущена (ArUco + Детектор тріщин)")
+        self.get_logger().info("✅ CameraNode запущена (ArUco + Тріщини в ROI + Грані об'єктів)")
 
     def timer_callback(self):
         ret, frame = self.cap.read()
         if not ret: return
 
-        # Отримуємо розміри кадру
         height, width, _ = frame.shape
         center_f_x = width // 2
         center_f_y = height // 2
 
-        # === НАЛАШТУВАННЯ ЗОНИ СКАНУВАННЯ ARUCO (ROI) ===
-        # Беремо 50% від ширини та висоти екрану по центру
+        # ==========================================
+        # 1. ПОШУК ГРАНЕЙ ОБ'ЄКТІВ (НА ВСЬОМУ КАДРІ)
+        frame = self.edge_detector.detect(frame)
+        # ==========================================
+
+        # === НАЛАШТУВАННЯ ЗОНИ СКАНУВАННЯ ARUCO ===
         roi_w = width // 2
         roi_h = height // 2
         
@@ -69,22 +69,17 @@ class CameraNode(Node):
         x2 = center_f_x + (roi_w // 2)
         y2 = center_f_y + (roi_h // 2)
 
-        # Малюємо оранжеву рамку зони пошуку (маркер буде видно тільки в ній)
+        # Малюємо оранжеву рамку зони пошуку ArUco та центр
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
-
-        # Малюємо червоне перехрестя центру кадру для візуалізації
         cv2.line(frame, (center_f_x - 10, center_f_y), (center_f_x + 10, center_f_y), (0, 0, 255), 2)
         cv2.line(frame, (center_f_x, center_f_y - 10), (center_f_x, center_f_y + 10), (0, 0, 255), 2)
 
-        # Вирізаємо частину кадру для обробки та переводимо в Ч/Б
-        roi_frame = frame[y1:y2, x1:x2]
-        gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
-        
         # Скануємо ТІЛЬКИ вирізану зону на наявність ArUco
-        corners, ids, rejected = aruco.detectMarkers(gray, self.aruco_dictionary, parameters=self.aruco_parameters)
+        roi_frame = frame[y1:y2, x1:x2]
+        gray_aruco = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+        corners, ids, rejected = aruco.detectMarkers(gray_aruco, self.aruco_dictionary, parameters=self.aruco_parameters)
 
         if ids is not None:
-            # Повертаємо координати кутів маркера назад до масштабів повного кадру
             for i in range(len(corners)):
                 corners[i][0][:, 0] += x1
                 corners[i][0][:, 1] += y1
@@ -92,25 +87,19 @@ class CameraNode(Node):
             aruco.drawDetectedMarkers(frame, corners, ids)
             
             for i in range(len(ids)):
-                # Обчислюємо центр маркера
                 c = corners[i][0]
                 m_x = int(c[:, 0].mean())
                 m_y = int(c[:, 1].mean())
 
-                # Малюємо зелену точку в центрі маркера
                 cv2.circle(frame, (m_x, m_y), 5, (0, 255, 0), -1)
 
-                # === ОБЧИСЛЕННЯ ЗМІЩЕННЯ ===
                 offset_x = m_x - center_f_x
-                offset_y = center_f_y - m_y  # Інвертуємо Y (вгору = +)
+                offset_y = center_f_y - m_y 
 
-                # Виводимо дані на екран
                 text = f"ID: {ids[i][0]} DX: {offset_x} DY: {offset_y}"
                 cv2.putText(frame, text, (m_x + 10, m_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
                 
-                # === ЛОГУВАННЯ ТІЛЬКИ ПРИ ЦЕНТРУВАННІ ===
-                tolerance = 25  # Допуск у пікселях (зона "прицілу")
-
+                tolerance = 25
                 if abs(offset_x) <= tolerance and abs(offset_y) <= tolerance:
                     self.get_logger().info(
                         f"🎯 ЦІЛЬ ЗАХОПЛЕНО! Marker {ids[i][0]} в центрі (X: {offset_x}, Y: {offset_y})",
@@ -118,10 +107,7 @@ class CameraNode(Node):
                     )
 
         # ==========================================
-        # === ПОШУК ТРІЩИН У СТРОГО ВИДІЛЕНІЙ ЗОНІ (ROI) ===
-        
-        # 1. Задаємо розміри зони аналізу (наприклад, ширина 400, висота 300 у центрі)
-        # Ви можете змінювати ці цифри під ваші потреби!
+        # 2. ПОШУК ТРІЩИН У СТРОГО ВИДІЛЕНІЙ ЗОНІ (ROI)
         scan_w = 400
         scan_h = 300
         
@@ -130,17 +116,12 @@ class CameraNode(Node):
         c_x2 = center_f_x + (scan_w // 2)
         c_y2 = center_f_y + (scan_h // 2)
 
-        # 2. Малюємо фіолетову рамку "Зони сканування"
         cv2.rectangle(frame, (c_x1, c_y1), (c_x2, c_y2), (255, 0, 255), 2)
         cv2.putText(frame, "CRACK SCAN ZONE", (c_x1, c_y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
 
-        # 3. Вирізаємо цей шматок зображення
         crack_roi = frame[c_y1:c_y2, c_x1:c_x2]
-
-        # 4. Відправляємо в детектор ТІЛЬКИ вирізаний шматок!
         processed_roi, is_crack_detected, crack_count = self.crack_detector.detect(crack_roi)
 
-        # 5. Вставляємо оброблений шматок (з намальованими тріщинами) назад у загальний кадр
         frame[c_y1:c_y2, c_x1:c_x2] = processed_roi
 
         if is_crack_detected:
@@ -150,11 +131,9 @@ class CameraNode(Node):
             )
         # ==========================================
 
-        # Показуємо вікно відлагодження
         cv2.imshow("ArUco Debug", frame)
         cv2.waitKey(1)
 
-        # Публікуємо кадр у ROS-топік
         msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
         self.pub_raw.publish(msg)
 
