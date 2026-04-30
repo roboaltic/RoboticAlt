@@ -27,8 +27,8 @@ def generate_launch_description():
             emulate_tty=True,
             parameters=[{
                 'cmd_vel_topic': '/cmd_vel_raw',
-                'linear_speed': 0.30,
-                'angular_speed': 1.2,
+                'linear_speed': 0.50,
+                'angular_speed': 1.7,
             }]
         ),
 
@@ -46,10 +46,10 @@ def generate_launch_description():
                 # False — щоб авто-нода не заважала клавіатурі
                 'auto_start': False,
 
-                'forward_speed': 0.11,
-                'forward_angular_compensation': -0.07,
+                'forward_speed': 0.5,
+                
 
-                'turn_speed': 0.75,
+                'turn_speed': 1.7,
                 'wall_follow_speed': 0.09,
 
                 'obstacle_dist': 0.55,
@@ -76,8 +76,8 @@ def generate_launch_description():
                 'scan_topic': '/scan',
                 'input_cmd_topic': '/cmd_vel_raw',
                 'output_cmd_topic': '/cmd_vel',
-                'stop_dist': 0.25,
-                'front_angle_deg': 20.0,
+                'stop_dist': 0.15,
+                'front_angle_deg': 35.0,
             }]
         ),
 
