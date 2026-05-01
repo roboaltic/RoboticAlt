@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>diff_drive_l298n</name>
+  <version>0.0.1</version>
+  <description>Differential drive control via L298N</description>
+
+  <maintainer email="user@todo.todo">user</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
