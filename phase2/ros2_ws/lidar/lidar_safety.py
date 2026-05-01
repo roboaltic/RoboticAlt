@@ -14,11 +14,7 @@ class LidarSafetyNode(Node):
         self.declare_parameter('output_cmd_topic', '/cmd_vel')
 
         self.declare_parameter('stop_dist', 0.20)
-
-        # True = перевіряємо весь scan, не тільки перед
         self.declare_parameter('use_full_scan', True)
-
-        # використовується тільки якщо use_full_scan=False
         self.declare_parameter('front_angle_deg', 60.0)
 
         self.scan_topic = self.get_parameter('scan_topic').value
@@ -31,12 +27,19 @@ class LidarSafetyNode(Node):
 
         self.front_dist = float('inf')
         self.have_scan = False
+
+        self.last_cmd = Twist()
+        self.have_cmd = False
+
         self.last_log_time = 0.0
 
         self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, 10)
         self.create_subscription(Twist, self.input_cmd_topic, self.cmd_callback, 10)
 
         self.cmd_pub = self.create_publisher(Twist, self.output_cmd_topic, 10)
+
+        # ВАЖЛИВО: safety тепер сам регулярно перевіряє стан
+        self.timer = self.create_timer(0.05, self.safety_loop)
 
         self.get_logger().info(
             f'Lidar safety started: {self.input_cmd_topic} -> {self.output_cmd_topic}, '
@@ -67,8 +70,6 @@ class LidarSafetyNode(Node):
 
         if values:
             values.sort()
-
-            # 10% точка, щоб не брати випадковий шум
             idx = max(0, min(len(values) - 1, int(len(values) * 0.1)))
             self.front_dist = values[idx]
             self.have_scan = True
@@ -82,28 +83,41 @@ class LidarSafetyNode(Node):
                 f'scan: front_dist={self.front_dist:.3f}, '
                 f'stop_dist={self.stop_dist:.3f}, '
                 f'have_scan={self.have_scan}, '
-                f'points={len(values)}, '
-                f'use_full_scan={self.use_full_scan}'
+                f'points={len(values)}'
             )
             self.last_log_time = now
 
     def cmd_callback(self, cmd):
-        safe_cmd = Twist()
+        self.last_cmd = cmd
+        self.have_cmd = True
+        self.publish_safe_cmd()
 
-        obstacle_ahead = self.have_scan and self.front_dist < self.stop_dist
-        wants_forward = cmd.linear.x > 0.0
+    def obstacle_ahead(self):
+        return self.have_scan and self.front_dist < self.stop_dist
 
-        if obstacle_ahead and wants_forward:
-            safe_cmd.linear.x = 0.0
-            safe_cmd.angular.z = 0.0
+    def wants_forward(self, cmd):
+        # Блокуємо рух вперед.
+        # Якщо хочеш блокувати ще й поворот на місці — додамо angular.z.
+        return cmd.linear.x > 0.0
+
+    def publish_safe_cmd(self):
+        if not self.have_cmd:
+            return
+
+        if self.obstacle_ahead() and self.wants_forward(self.last_cmd):
+            stop_cmd = Twist()
+            self.cmd_pub.publish(stop_cmd)
 
             self.get_logger().warn(
-                f'SAFETY STOP: obstacle at {self.front_dist:.3f} m'
+                f'SAFETY STOP: front_dist={self.front_dist:.3f} < stop_dist={self.stop_dist:.3f}'
             )
         else:
-            safe_cmd = cmd
+            self.cmd_pub.publish(self.last_cmd)
 
-        self.cmd_pub.publish(safe_cmd)
+    def safety_loop(self):
+        # Навіть якщо нових команд з keyboard немає,
+        # при появі перешкоди safety сам відправить stop.
+        self.publish_safe_cmd()
 
     def destroy_node(self):
         self.cmd_pub.publish(Twist())
