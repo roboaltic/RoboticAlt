@@ -9,6 +9,7 @@ from geometry_msgs.msg import Twist
 
 
 class State(Enum):
+    STOPPED = 0
     FORWARD = 1
     TURN_LEFT = 2
     TURN_RIGHT = 3
@@ -23,13 +24,12 @@ class LidarObstacleNode(Node):
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
 
-        self.declare_parameter('forward_speed', 0.11)
-        self.declare_parameter('turn_speed', 0.75)
-        self.declare_parameter('wall_follow_speed', 0.09)
+        # якщо False у launch — нода НЕ буде сама їхати
+        self.declare_parameter('auto_start', False)
 
-        # компенсація правого двигуна
-        # для прямого руху: x=0.11, z=-0.07
-        self.declare_parameter('forward_angular_compensation', -0.07)
+        self.declare_parameter('forward_speed', 0.5)
+        self.declare_parameter('turn_speed', 1.7)
+        self.declare_parameter('wall_follow_speed', 0.3)
 
         self.declare_parameter('obstacle_dist', 0.55)
         self.declare_parameter('clear_dist', 0.85)
@@ -39,18 +39,16 @@ class LidarObstacleNode(Node):
         self.declare_parameter('wall_kp', 1.4)
         self.declare_parameter('return_gain', 1.0)
 
-        self.declare_parameter('control_period', 0.05)
+        self.declare_parameter('control_period', 0.15)
         self.declare_parameter('exit_confirm_cycles', 8)
 
         self.scan_topic = self.get_parameter('scan_topic').value
         self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
+        self.auto_start = bool(self.get_parameter('auto_start').value)
 
         self.forward_speed = float(self.get_parameter('forward_speed').value)
         self.turn_speed = float(self.get_parameter('turn_speed').value)
         self.wall_follow_speed = float(self.get_parameter('wall_follow_speed').value)
-        self.forward_angular_comp = float(
-            self.get_parameter('forward_angular_compensation').value
-        )
 
         self.obstacle_dist = float(self.get_parameter('obstacle_dist').value)
         self.clear_dist = float(self.get_parameter('clear_dist').value)
@@ -71,10 +69,9 @@ class LidarObstacleNode(Node):
         )
 
         self.cmd_pub = self.create_publisher(Twist, self.cmd_vel_topic, 10)
-
         self.timer = self.create_timer(self.control_period, self.control_loop)
 
-        self.state = State.FORWARD
+        self.state = State.FORWARD if self.auto_start else State.STOPPED
         self.latest_scan = None
 
         self.avoid_side = None
@@ -84,11 +81,15 @@ class LidarObstacleNode(Node):
 
         self.exit_counter = 0
         self.last_log_state = None
+        self.last_debug_time = 0.0
 
         self.get_logger().info('Lidar obstacle avoidance node started.')
         self.get_logger().info(
-            f'Forward command: x={self.forward_speed:.2f}, '
-            f'z={self.forward_angular_comp:.2f}'
+            f'auto_start={self.auto_start}, initial_state={self.state.name}, '
+            f'output_topic={self.cmd_vel_topic}'
+        )
+        self.get_logger().info(
+            f'Forward command: x={self.forward_speed:.2f}, z=0.00'
         )
 
     def scan_callback(self, msg: LaserScan):
@@ -114,8 +115,6 @@ class LidarObstacleNode(Node):
             return float('inf')
 
         values.sort()
-
-        # не беремо абсолютно мінімальну точку, бо вона може бути шумом
         index = max(0, min(len(values) - 1, int(len(values) * 0.1)))
         return values[index]
 
@@ -137,12 +136,17 @@ class LidarObstacleNode(Node):
         msg = Twist()
         msg.linear.x = float(linear_x)
         msg.angular.z = float(angular_z)
+
+        self.get_logger().info(
+            f'PUBLISH -> {self.cmd_vel_topic}: '
+            f'x={msg.linear.x:.3f}, z={msg.angular.z:.3f}, state={self.state.name}'
+        )
+
         self.cmd_pub.publish(msg)
 
-    def publish_forward_compensated(self, linear_x, extra_angular_z=0.0):
-        angular = self.forward_angular_comp + extra_angular_z
-        angular = max(min(angular, 1.5), -1.5)
-        self.publish_cmd(linear_x, angular)
+    def publish_forward(self, linear_x, angular_z=0.0):
+        angular_z = max(min(angular_z, 1.5), -1.5)
+        self.publish_cmd(linear_x, angular_z)
 
     def stop_robot(self):
         self.publish_cmd(0.0, 0.0)
@@ -163,6 +167,18 @@ class LidarObstacleNode(Node):
             self.stop_robot()
             return
 
+        if self.state == State.STOPPED:
+            self.log_state_once('State: STOPPED')
+            # ВАЖЛИВО: у STOPPED не спамимо /cmd_vel нулями постійно
+            return
+
+        now_debug = self.now_sec()
+        if now_debug - self.last_debug_time > 1.0:
+            self.get_logger().info(
+                f'DEBUG state={self.state.name}, regions={regions}'
+            )
+            self.last_debug_time = now_debug
+
         front = regions['front']
         left = regions['left']
         right = regions['right']
@@ -177,57 +193,37 @@ class LidarObstacleNode(Node):
                     self.avoid_side = 'left'
                     self.state = State.TURN_LEFT
                     self.turn_start_time = self.now_sec()
-                    self.get_logger().info(
-                        f'Obstacle ahead. Turning LEFT. '
-                        f'front={front:.2f}, left={left:.2f}, right={right:.2f}'
-                    )
                 else:
                     self.avoid_side = 'right'
                     self.state = State.TURN_RIGHT
                     self.turn_start_time = self.now_sec()
-                    self.get_logger().info(
-                        f'Obstacle ahead. Turning RIGHT. '
-                        f'front={front:.2f}, left={left:.2f}, right={right:.2f}'
-                    )
 
                 self.exit_counter = 0
                 self.stop_robot()
                 return
 
-            self.publish_forward_compensated(self.forward_speed, 0.0)
+            self.publish_forward(self.forward_speed, 0.0)
             return
 
         if self.state == State.TURN_LEFT:
-            self.log_state_once('State: TURN_LEFT')
-
             self.publish_cmd(0.03, self.turn_speed)
 
             if front > self.clear_dist and front_left > self.clear_dist * 0.8:
                 self.turn_duration = self.now_sec() - self.turn_start_time
                 self.state = State.FOLLOW_WALL
                 self.exit_counter = 0
-                self.get_logger().info(
-                    f'Finished LEFT turn. Duration={self.turn_duration:.2f}s.'
-                )
             return
 
         if self.state == State.TURN_RIGHT:
-            self.log_state_once('State: TURN_RIGHT')
-
             self.publish_cmd(0.03, -self.turn_speed)
 
             if front > self.clear_dist and front_right > self.clear_dist * 0.8:
                 self.turn_duration = self.now_sec() - self.turn_start_time
                 self.state = State.FOLLOW_WALL
                 self.exit_counter = 0
-                self.get_logger().info(
-                    f'Finished RIGHT turn. Duration={self.turn_duration:.2f}s.'
-                )
             return
 
         if self.state == State.FOLLOW_WALL:
-            self.log_state_once(f'State: FOLLOW_WALL ({self.avoid_side})')
-
             if front < self.obstacle_dist * 0.8:
                 if self.avoid_side == 'left':
                     self.publish_cmd(0.0, self.turn_speed)
@@ -248,7 +244,7 @@ class LidarObstacleNode(Node):
 
             wall_correction = max(min(wall_correction, 1.0), -1.0)
 
-            self.publish_forward_compensated(
+            self.publish_forward(
                 self.wall_follow_speed,
                 wall_correction
             )
@@ -261,15 +257,9 @@ class LidarObstacleNode(Node):
             if self.exit_counter >= self.exit_confirm_cycles:
                 self.state = State.RETURN_HEADING
                 self.return_start_time = self.now_sec()
-                self.get_logger().info(
-                    f'Exit detected. Returning heading. '
-                    f'turn_duration={self.turn_duration:.2f}s'
-                )
             return
 
         if self.state == State.RETURN_HEADING:
-            self.log_state_once('State: RETURN_HEADING')
-
             return_duration = self.turn_duration * self.return_gain
             elapsed = self.now_sec() - self.return_start_time
 
@@ -281,8 +271,7 @@ class LidarObstacleNode(Node):
             else:
                 self.state = State.FORWARD
                 self.exit_counter = 0
-                self.get_logger().info('Return completed. Back to FORWARD.')
-                self.publish_forward_compensated(self.forward_speed, 0.0)
+                self.publish_forward(self.forward_speed, 0.0)
 
     def destroy_node(self):
         self.stop_robot()
@@ -305,4 +294,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-  

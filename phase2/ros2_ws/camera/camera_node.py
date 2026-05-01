@@ -1,4 +1,12 @@
+#!/usr/bin/env python3
+
+import cv2
+import cv2.aruco as aruco
 import rclpy
+
+# from camera.crack_detector import CrackDetector, ObjectEdgeDetector
+from camera.crack_detector import CrackDetector, ObjectEdgeDetector
+from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
@@ -37,7 +45,8 @@ class ArucoDetectorNode(Node):
 
     def process_frame(self):
         ret, frame = self.cap.read()
-        if not ret: return
+        if not ret:
+            return
 
         h, w, _ = frame.shape
         cx, cy = w // 2, h // 2 # Центр кадру
@@ -102,6 +111,7 @@ class ArucoDetectorNode(Node):
         cv2.destroyAllWindows()
         super().destroy_node()
 
+
 def main():
     rclpy.init()
     node = ArucoDetectorNode()
@@ -111,7 +121,9 @@ def main():
         pass
     finally:
         node.destroy_node()
+        cv2.destroyAllWindows()
         rclpy.shutdown()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
