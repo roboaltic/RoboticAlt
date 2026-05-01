@@ -10,7 +10,7 @@ from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 
-DEV = "/dev/video4"  # в цю змінну вписуємо шлях до камери
+DEV = "/dev/video2"  # в цю змінну вписуємо шлях до камери
 
 
 class CameraNode(Node):
