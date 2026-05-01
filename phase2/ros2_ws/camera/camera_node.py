@@ -9,184 +9,112 @@ from camera.crack_detector import CrackDetector, ObjectEdgeDetector
 from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image
+from geometry_msgs.msg import Twist
+from std_msgs.msg import Int32
+from cv_bridge import CvBridge
+import cv2
+import cv2.aruco as aruco
 
-DEV = "/dev/video2"  # в цю змінну вписуємо шлях до камери
-
-
-class CameraNode(Node):
+class ArucoDetectorNode(Node):
     def __init__(self):
-        super().__init__("camera_node")
+        super().__init__('aruco_detector_node')
 
-        self.declare_parameter("device", DEV)
-        self.declare_parameter("fps", 15)
-        self.declare_parameter("width", 640)
-        self.declare_parameter("height", 480)
+        # --- ПАРАМЕТРИ КАМЕРИ ---
+        self.declare_parameter('device', '/dev/video0')
+        self.cap = cv2.VideoCapture(self.get_parameter('device').value)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-        device = self.get_parameter("device").get_parameter_value().string_value
-        fps = self.get_parameter("fps").get_parameter_value().integer_value
-        width = self.get_parameter("width").get_parameter_value().integer_value
-        height = self.get_parameter("height").get_parameter_value().integer_value
+        # Поріг для виведення логів (50 пікселів від центру)
+        self.log_threshold = 50 
 
-        self.aruco_dictionary = aruco.Dictionary_get(aruco.DICT_ARUCO_ORIGINAL)
-        self.aruco_parameters = aruco.DetectorParameters_create()
-        self.aruco_parameters.adaptiveThreshConstant = 7
-        self.aruco_parameters.minMarkerPerimeterRate = 0.03
+        # Налаштування ArUco (Original 5x5 згідно з Етапом 2)
+        self.aruco_dict = aruco.Dictionary_get(aruco.DICT_ARUCO_ORIGINAL)
+        self.aruco_params = aruco.DetectorParameters_create()
 
-        # Ініціалізація наших модулів комп'ютерного зору
-        self.crack_detector = CrackDetector()
-        # Шукаємо об'єкти від 2000 до 80000 пікселів
-        self.edge_detector = ObjectEdgeDetector(min_area=2000, max_area=80000)
+        # Публікація команд руху та сигналів зумера
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.buzzer_pub = self.create_publisher(Int32, '/buzzer_signal', 10)
 
-        self.cap = cv2.VideoCapture(device)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        self.cap.set(cv2.CAP_PROP_FPS, fps)
-
-        if not self.cap.isOpened():
-            self.get_logger().error(f"❌ Не вдалося відкрити камеру на {device}")
-            raise RuntimeError("Camera open failed")
-
-        from rclpy.qos import QoSProfile
-
-        self.pub_raw = self.create_publisher(Image, "/image_raw", QoSProfile(depth=10))
         self.bridge = CvBridge()
+        self.passed_markers = []  # Список пройдених ID (Ризик 2)
+        self.mission_stage = 0    # Лічильник етапів (Етап 6)
+        
+        self.timer = self.create_timer(1.0 / 15, self.process_frame)
+        self.get_logger().info("✅ Контролер камери запущено. Очікування мітки...")
 
-        self.timer = self.create_timer(1.0 / fps, self.timer_callback)
-        self.get_logger().info(
-            "✅ CameraNode запущена (ArUco + Тріщини в ROI + Грані об'єктів)"
-        )
-
-    def timer_callback(self):
+    def process_frame(self):
         ret, frame = self.cap.read()
         if not ret:
             return
 
-        height, width, _ = frame.shape
-        center_f_x = width // 2
-        center_f_y = height // 2
+        h, w, _ = frame.shape
+        cx, cy = w // 2, h // 2 # Центр кадру
 
-        # ==========================================
-        # 1. ПОШУК ГРАНЕЙ ОБ'ЄКТІВ (НА ВСЬОМУ КАДРІ)
-        frame = self.edge_detector.detect(frame)
-        # ==========================================
+        # --- ВІЗУАЛІЗАЦІЯ ЦЕНТРУ ---
+        # Малюємо хрест по центру кадру
+        cv2.line(frame, (cx - 15, cy), (cx + 15, cy), (0, 0, 255), 1)
+        cv2.line(frame, (cx, cy - 15), (cx, cy + 15), (0, 0, 255), 1)
+        # Малюємо рамку зони логування
+        cv2.rectangle(frame, (cx - self.log_threshold, cy - self.log_threshold), 
+                      (cx + self.log_threshold, cy + self.log_threshold), (200, 200, 200), 1)
 
-        # === НАЛАШТУВАННЯ ЗОНИ СКАНУВАННЯ ARUCO ===
-        roi_w = width // 2
-        roi_h = height // 2
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        corners, ids, rejected = aruco.detectMarkers(gray, self.aruco_dict, parameters=self.aruco_params)
 
-        x1 = center_f_x - (roi_w // 2)
-        y1 = center_f_y - (roi_h // 2)
-        x2 = center_f_x + (roi_w // 2)
-        y2 = center_f_y + (roi_h // 2)
-
-        # Малюємо оранжеву рамку зони пошуку ArUco та центр
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
-        cv2.line(
-            frame,
-            (center_f_x - 10, center_f_y),
-            (center_f_x + 10, center_f_y),
-            (0, 0, 255),
-            2,
-        )
-        cv2.line(
-            frame,
-            (center_f_x, center_f_y - 10),
-            (center_f_x, center_f_y + 10),
-            (0, 0, 255),
-            2,
-        )
-
-        # Скануємо ТІЛЬКИ вирізану зону на наявність ArUco
-        roi_frame = frame[y1:y2, x1:x2]
-        gray_aruco = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, rejected = aruco.detectMarkers(
-            gray_aruco, self.aruco_dictionary, parameters=self.aruco_parameters
-        )
+        cmd = Twist()
 
         if ids is not None:
-            for i in range(len(corners)):
-                corners[i][0][:, 0] += x1
-                corners[i][0][:, 1] += y1
-
-            aruco.drawDetectedMarkers(frame, corners, ids)
-
-            for i in range(len(ids)):
-                c = corners[i][0]
+            current_id = ids[0][0]
+            
+            # Обробляємо тільки нові мітки (Етап 5)
+            if current_id not in self.passed_markers:
+                c = corners[0][0]
                 m_x = int(c[:, 0].mean())
                 m_y = int(c[:, 1].mean())
+                marker_width = abs(c[0][0] - c[1][0]) # Оцінка близькості
+                
+                offset_x = m_x - cx
+                offset_y = cy - m_y
 
-                cv2.circle(frame, (m_x, m_y), 5, (0, 255, 0), -1)
+                # Візуалізація маркера та його координат
+                aruco.drawDetectedMarkers(frame, corners, ids)
+                coord_text = f"DX: {offset_x} DY: {offset_y}"
+                cv2.putText(frame, coord_text, (m_x + 10, m_y - 10), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
 
-                offset_x = m_x - center_f_x
-                offset_y = center_f_y - m_y
+                # --- ЛОГІКА РУХУ (Етап 3) ---
+                if marker_width > 220: # Зупинка за ~20 см
+                    self.passed_markers.append(current_id)
+                    self.mission_stage += 1
+                    self.buzzer_pub.publish(Int32(data=1)) # Сигнал зумера
+                    cmd.linear.x = 0.0
+                    cmd.angular.z = 0.0
+                elif abs(offset_x) > 30: # Автокорекція напрямку
+                    cmd.angular.z = -0.003 * offset_x
+                    cmd.linear.x = 0.05
+                else: # Рух вперед
+                    cmd.linear.x = 0.15
+                    cmd.angular.z = 0.0
 
-                text = f"ID: {ids[i][0]} DX: {offset_x} DY: {offset_y}"
-                cv2.putText(
-                    frame,
-                    text,
-                    (m_x + 10, m_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (255, 255, 0),
-                    2,
-                )
+                # --- РОЗУМНІ ЛОГИ ---
+                # Виводимо в термінал тільки якщо маркер у зоні центру
+                if abs(offset_x) < self.log_threshold and abs(offset_y) < self.log_threshold:
+                    self.get_logger().info(f"🎯 ЦІЛЬ: ID {current_id} | DX: {offset_x} DY: {offset_y} | Stage: {self.mission_stage}")
 
-                tolerance = 25
-                if abs(offset_x) <= tolerance and abs(offset_y) <= tolerance:
-                    self.get_logger().info(
-                        f"🎯 ЦІЛЬ ЗАХОПЛЕНО! Marker {ids[i][0]} в центрі (X: {offset_x}, Y: {offset_y})",
-                        throttle_duration_sec=1.0,
-                    )
-
-        # ==========================================
-        # 2. ПОШУК ТРІЩИН У СТРОГО ВИДІЛЕНІЙ ЗОНІ (ROI)
-        scan_w = 400
-        scan_h = 300
-
-        c_x1 = center_f_x - (scan_w // 2)
-        c_y1 = center_f_y - (scan_h // 2)
-        c_x2 = center_f_x + (scan_w // 2)
-        c_y2 = center_f_y + (scan_h // 2)
-
-        cv2.rectangle(frame, (c_x1, c_y1), (c_x2, c_y2), (255, 0, 255), 2)
-        cv2.putText(
-            frame,
-            "CRACK SCAN ZONE",
-            (c_x1, c_y1 - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255, 0, 255),
-            2,
-        )
-
-        crack_roi = frame[c_y1:c_y2, c_x1:c_x2]
-        processed_roi, is_crack_detected, crack_count = self.crack_detector.detect(
-            crack_roi
-        )
-
-        frame[c_y1:c_y2, c_x1:c_x2] = processed_roi
-
-        if is_crack_detected:
-            self.get_logger().warn(
-                f"⚠️ Увага: Виявлено {crack_count} тріщин(у) в зоні інспекції!",
-                throttle_duration_sec=2.0,
-            )
-        # ==========================================
-
-        cv2.imshow("ArUco Debug", frame)
+        self.cmd_pub.publish(cmd)
+        cv2.imshow("Robot Vision", frame)
         cv2.waitKey(1)
-
-        msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-        self.pub_raw.publish(msg)
 
     def destroy_node(self):
         self.cap.release()
+        cv2.destroyAllWindows()
         super().destroy_node()
 
 
 def main():
     rclpy.init()
-    node = CameraNode()
+    node = ArucoDetectorNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
