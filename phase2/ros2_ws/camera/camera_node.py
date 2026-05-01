@@ -10,7 +10,7 @@ from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 
-DEV = "/dev/video2"  # в цю змінну вписуємо шлях до камери
+DEV = "/dev/video0"  # в цю змінну вписуємо шлях до камери
 
 
 class CameraNode(Node):
@@ -61,25 +61,23 @@ class CameraNode(Node):
         if not ret:
             return
 
+        # Получаем размеры кадра
         height, width, _ = frame.shape
         center_f_x = width // 2
         center_f_y = height // 2
 
-        # ==========================================
-        # 1. ПОШУК ГРАНЕЙ ОБ'ЄКТІВ (НА ВСЬОМУ КАДРІ)
-        frame = self.edge_detector.detect(frame)
-        # ==========================================
+        # ==========================================================
+        # 1. ПОШУК ОБ'ЄКТІВ (На всьому кадрі)
+        # Получаем обновленный кадр и список контуров найденных деталей
+        frame, found_objects = self.edge_detector.detect(frame)
+        # ==========================================================
 
         # === НАЛАШТУВАННЯ ЗОНИ СКАНУВАННЯ ARUCO ===
-        roi_w = width // 2
-        roi_h = height // 2
+        roi_w, roi_h = width // 2, height // 2
+        x1, y1 = center_f_x - (roi_w // 2), center_f_y - (roi_h // 2)
+        x2, y2 = center_f_x + (roi_w // 2), center_f_y + (roi_h // 2)
 
-        x1 = center_f_x - (roi_w // 2)
-        y1 = center_f_y - (roi_h // 2)
-        x2 = center_f_x + (roi_w // 2)
-        y2 = center_f_y + (roi_h // 2)
-
-        # Малюємо оранжеву рамку зони пошуку ArUco та центр
+        # Отрисовка прицела ArUco
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
         cv2.line(
             frame,
@@ -96,34 +94,31 @@ class CameraNode(Node):
             2,
         )
 
-        # Скануємо ТІЛЬКИ вирізану зону на наявність ArUco
-        roi_frame = frame[y1:y2, x1:x2]
-        gray_aruco = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, rejected = aruco.detectMarkers(
+        # Работа с ArUco (внутри ROI)
+        roi_aruco = frame[y1:y2, x1:x2]
+        gray_aruco = cv2.cvtColor(roi_aruco, cv2.COLOR_BGR2GRAY)
+        corners, ids, _ = aruco.detectMarkers(
             gray_aruco, self.aruco_dictionary, parameters=self.aruco_parameters
         )
 
         if ids is not None:
+            # Коррекция координат ArUco под полный кадр
             for i in range(len(corners)):
                 corners[i][0][:, 0] += x1
                 corners[i][0][:, 1] += y1
 
             aruco.drawDetectedMarkers(frame, corners, ids)
-
             for i in range(len(ids)):
                 c = corners[i][0]
-                m_x = int(c[:, 0].mean())
-                m_y = int(c[:, 1].mean())
-
-                cv2.circle(frame, (m_x, m_y), 5, (0, 255, 0), -1)
+                m_x, m_y = int(c[:, 0].mean()), int(c[:, 1].mean())
 
                 offset_x = m_x - center_f_x
                 offset_y = center_f_y - m_y
 
-                text = f"ID: {ids[i][0]} DX: {offset_x} DY: {offset_y}"
+                cv2.circle(frame, (m_x, m_y), 5, (0, 255, 0), -1)
                 cv2.putText(
                     frame,
-                    text,
+                    f"ID: {ids[i][0]} DX: {offset_x} DY: {offset_y}",
                     (m_x + 10, m_y),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
@@ -131,53 +126,50 @@ class CameraNode(Node):
                     2,
                 )
 
-                tolerance = 25
-                if abs(offset_x) <= tolerance and abs(offset_y) <= tolerance:
+                if abs(offset_x) <= 25 and abs(offset_y) <= 25:
                     self.get_logger().info(
-                        f"🎯 ЦІЛЬ ЗАХОПЛЕНО! Marker {ids[i][0]} в центрі (X: {offset_x}, Y: {offset_y})",
-                        throttle_duration_sec=1.0,
+                        f"🎯 TARGET LOCKED: ID {ids[i][0]}", throttle_duration_sec=1.0
                     )
 
-        # ==========================================
-        # 2. ПОШУК ТРІЩИН У СТРОГО ВИДІЛЕНІЙ ЗОНІ (ROI)
-        scan_w = 400
-        scan_h = 300
-
+        # ==========================================================
+        # 2. ПОШУК ТРІЩИН (Тільки всередині знайдених об'єктів)
+        # ==========================================================
+        scan_w, scan_h = 400, 300
         c_x1 = center_f_x - (scan_w // 2)
         c_y1 = center_f_y - (scan_h // 2)
         c_x2 = center_f_x + (scan_w // 2)
         c_y2 = center_f_y + (scan_h // 2)
 
+        # Малюємо рамку зони інспекції трещин
         cv2.rectangle(frame, (c_x1, c_y1), (c_x2, c_y2), (255, 0, 255), 2)
-        cv2.putText(
-            frame,
-            "CRACK SCAN ZONE",
-            (c_x1, c_y1 - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255, 0, 255),
-            2,
-        )
 
+        # Вирізаємо область для детектора трещин
         crack_roi = frame[c_y1:c_y2, c_x1:c_x2]
+
+        # Передаємо: саму картинку, контури об'єктів та зміщення (offset) координат
         processed_roi, is_crack_detected, crack_count = self.crack_detector.detect(
-            crack_roi
+            crack_roi, parent_contours=found_objects, offset=(c_x1, c_y1)
         )
 
+        # Повертаємо оброблений ROI назад на основний кадр
         frame[c_y1:c_y2, c_x1:c_x2] = processed_roi
 
         if is_crack_detected:
             self.get_logger().warn(
-                f"⚠️ Увага: Виявлено {crack_count} тріщин(у) в зоні інспекції!",
+                f"⚠️ CRITICAL: Found {crack_count} cracks inside objects!",
                 throttle_duration_sec=2.0,
             )
-        # ==========================================
+        # ==========================================================
 
-        cv2.imshow("ArUco Debug", frame)
+        # Показ результату та публікація
+        cv2.imshow("Detection Debug", frame)
         cv2.waitKey(1)
 
-        msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-        self.pub_raw.publish(msg)
+        try:
+            msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+            self.pub_raw.publish(msg)
+        except Exception as e:
+            self.get_logger().error(f"Failed to publish image: {e}")
 
     def destroy_node(self):
         self.cap.release()
