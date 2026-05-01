@@ -9,6 +9,7 @@ from geometry_msgs.msg import Twist
 
 
 class State(Enum):
+    STOPPED = 0
     FORWARD = 1
     TURN_LEFT = 2
     TURN_RIGHT = 3
@@ -23,9 +24,12 @@ class LidarObstacleNode(Node):
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
 
-        self.declare_parameter('forward_speed', 0.11)
-        self.declare_parameter('turn_speed', 0.75)
-        self.declare_parameter('wall_follow_speed', 0.09)
+        # якщо False у launch — нода НЕ буде сама їхати
+        self.declare_parameter('auto_start', False)
+
+        self.declare_parameter('forward_speed', 0.5)
+        self.declare_parameter('turn_speed', 1.7)
+        self.declare_parameter('wall_follow_speed', 0.3)
 
         self.declare_parameter('obstacle_dist', 0.55)
         self.declare_parameter('clear_dist', 0.85)
@@ -35,11 +39,12 @@ class LidarObstacleNode(Node):
         self.declare_parameter('wall_kp', 1.4)
         self.declare_parameter('return_gain', 1.0)
 
-        self.declare_parameter('control_period', 0.05)
+        self.declare_parameter('control_period', 0.15)
         self.declare_parameter('exit_confirm_cycles', 8)
 
         self.scan_topic = self.get_parameter('scan_topic').value
         self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
+        self.auto_start = bool(self.get_parameter('auto_start').value)
 
         self.forward_speed = float(self.get_parameter('forward_speed').value)
         self.turn_speed = float(self.get_parameter('turn_speed').value)
@@ -64,10 +69,9 @@ class LidarObstacleNode(Node):
         )
 
         self.cmd_pub = self.create_publisher(Twist, self.cmd_vel_topic, 10)
-
         self.timer = self.create_timer(self.control_period, self.control_loop)
 
-        self.state = State.FORWARD
+        self.state = State.FORWARD if self.auto_start else State.STOPPED
         self.latest_scan = None
 
         self.avoid_side = None
@@ -77,8 +81,13 @@ class LidarObstacleNode(Node):
 
         self.exit_counter = 0
         self.last_log_state = None
+        self.last_debug_time = 0.0
 
         self.get_logger().info('Lidar obstacle avoidance node started.')
+        self.get_logger().info(
+            f'auto_start={self.auto_start}, initial_state={self.state.name}, '
+            f'output_topic={self.cmd_vel_topic}'
+        )
         self.get_logger().info(
             f'Forward command: x={self.forward_speed:.2f}, z=0.00'
         )
@@ -127,6 +136,12 @@ class LidarObstacleNode(Node):
         msg = Twist()
         msg.linear.x = float(linear_x)
         msg.angular.z = float(angular_z)
+
+        self.get_logger().info(
+            f'PUBLISH -> {self.cmd_vel_topic}: '
+            f'x={msg.linear.x:.3f}, z={msg.angular.z:.3f}, state={self.state.name}'
+        )
+
         self.cmd_pub.publish(msg)
 
     def publish_forward(self, linear_x, angular_z=0.0):
@@ -151,6 +166,18 @@ class LidarObstacleNode(Node):
             self.log_state_once('Waiting for /scan...')
             self.stop_robot()
             return
+
+        if self.state == State.STOPPED:
+            self.log_state_once('State: STOPPED')
+            # ВАЖЛИВО: у STOPPED не спамимо /cmd_vel нулями постійно
+            return
+
+        now_debug = self.now_sec()
+        if now_debug - self.last_debug_time > 1.0:
+            self.get_logger().info(
+                f'DEBUG state={self.state.name}, regions={regions}'
+            )
+            self.last_debug_time = now_debug
 
         front = regions['front']
         left = regions['left']
@@ -197,7 +224,6 @@ class LidarObstacleNode(Node):
             return
 
         if self.state == State.FOLLOW_WALL:
-
             if front < self.obstacle_dist * 0.8:
                 if self.avoid_side == 'left':
                     self.publish_cmd(0.0, self.turn_speed)
@@ -234,7 +260,6 @@ class LidarObstacleNode(Node):
             return
 
         if self.state == State.RETURN_HEADING:
-
             return_duration = self.turn_duration * self.return_gain
             elapsed = self.now_sec() - self.return_start_time
 
