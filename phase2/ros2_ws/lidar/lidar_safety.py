@@ -15,9 +15,19 @@ class LidarSafetyNode(Node):
         self.declare_parameter('input_cmd_topic', '/cmd_vel_raw')
         self.declare_parameter('output_cmd_topic', '/cmd_vel')
 
-        self.declare_parameter('stop_dist', 0.20)
-        self.declare_parameter('use_full_scan', True)
-        self.declare_parameter('front_angle_deg', 60.0)
+        self.declare_parameter('stop_dist', 0.30)
+
+        # False = перевіряємо тільки передню зону
+        # True = перевіряємо весь 360 scan
+        self.declare_parameter('use_full_scan', False)
+
+        # Центр передньої зони.
+        # Якщо перед роботом у лідара це не 0°, зміниш у launch на 90/180/270.
+        self.declare_parameter('front_center_deg', 0.0)
+
+        # Ширина зони в один бік.
+        # 45 означає сектор від -45° до +45° відносно front_center_deg.
+        self.declare_parameter('front_angle_deg', 45.0)
 
         self.scan_topic = self.get_parameter('scan_topic').value
         self.input_cmd_topic = self.get_parameter('input_cmd_topic').value
@@ -25,10 +35,12 @@ class LidarSafetyNode(Node):
 
         self.stop_dist = float(self.get_parameter('stop_dist').value)
         self.use_full_scan = bool(self.get_parameter('use_full_scan').value)
+        self.front_center_deg = float(self.get_parameter('front_center_deg').value)
         self.front_angle_deg = float(self.get_parameter('front_angle_deg').value)
 
         self.front_dist = float('inf')
         self.have_scan = False
+        self.points_in_zone = 0
 
         self.last_cmd = Twist()
         self.have_cmd = False
@@ -62,11 +74,23 @@ class LidarSafetyNode(Node):
             f'Lidar safety started: {self.input_cmd_topic} -> {self.output_cmd_topic}, '
             f'stop_dist={self.stop_dist:.3f}, '
             f'use_full_scan={self.use_full_scan}, '
+            f'front_center_deg={self.front_center_deg:.1f}, '
             f'front_angle_deg={self.front_angle_deg:.1f}'
         )
 
     def now_sec(self):
         return self.get_clock().now().nanoseconds / 1e9
+
+    def normalize_angle_deg(self, angle_deg):
+        return angle_deg % 360.0
+
+    def angle_in_front_zone(self, angle_deg):
+        angle_deg = self.normalize_angle_deg(angle_deg)
+        center = self.normalize_angle_deg(self.front_center_deg)
+
+        diff = (angle_deg - center + 180.0) % 360.0 - 180.0
+
+        return abs(diff) <= self.front_angle_deg
 
     def scan_callback(self, msg):
         values = []
@@ -78,12 +102,14 @@ class LidarSafetyNode(Node):
             if self.use_full_scan:
                 angle_ok = True
             else:
-                angle_ok = -self.front_angle_deg <= angle_deg <= self.front_angle_deg
+                angle_ok = self.angle_in_front_zone(angle_deg)
 
             if angle_ok and math.isfinite(r) and msg.range_min < r < msg.range_max:
                 values.append(r)
 
             angle += msg.angle_increment
+
+        self.points_in_zone = len(values)
 
         if values:
             values.sort()
@@ -102,8 +128,10 @@ class LidarSafetyNode(Node):
                 f'SCAN: front_dist={self.front_dist:.3f}, '
                 f'stop_dist={self.stop_dist:.3f}, '
                 f'have_scan={self.have_scan}, '
-                f'points={len(values)}, '
-                f'use_full_scan={self.use_full_scan}'
+                f'points_in_zone={self.points_in_zone}, '
+                f'use_full_scan={self.use_full_scan}, '
+                f'front_center={self.front_center_deg:.1f}, '
+                f'front_angle={self.front_angle_deg:.1f}'
             )
             self.last_scan_log_time = now
 
