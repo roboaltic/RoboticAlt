@@ -1,64 +1,110 @@
-import math
+#!/usr/bin/env python3
+
+import time
 
 import rclpy
 from rclpy.node import Node
 
-from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
+from std_msgs.msg import Float32, Bool
 
 
-class LidarSafetyNode(Node):
+class LidarSafety(Node):
+    """
+    Manual driving lidar safety node.
+
+    Input:
+      /cmd_vel_raw              from keycontrol.py
+      /lidar/front_distance     from ld06_node.py
+
+    Output:
+      /cmd_vel                  to motor_node
+
+    Logic:
+      if moving forward and front distance <= stop_distance_m:
+          block forward movement
+      rotation and reverse are allowed by default
+    """
+
     def __init__(self):
         super().__init__('lidar_safety')
 
-        self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('input_cmd_topic', '/cmd_vel_raw')
         self.declare_parameter('output_cmd_topic', '/cmd_vel')
+        self.declare_parameter('front_distance_topic', '/lidar/front_distance')
+        self.declare_parameter('safety_stop_topic', '/safety/lidar_stop')
 
-        self.declare_parameter('stop_dist', 0.30)
+        self.declare_parameter('cmd_timeout_sec', 0.5)
+        self.declare_parameter('lidar_timeout_sec', 0.7)
 
-        # False = перевіряємо тільки передню зону
-        # True = перевіряємо весь 360 scan
-        self.declare_parameter('use_full_scan', False)
+        # На якій дистанції зупиняти рух вперед.
+        self.declare_parameter('stop_distance_m', 0.45)
 
-        # Центр передньої зони.
-        # Якщо перед роботом у лідара це не 0°, зміниш у launch на 90/180/270.
-        self.declare_parameter('front_center_deg', 0.0)
+        # На якій дистанції знову дозволити рух вперед.
+        # Має бути трохи більше stop_distance_m, щоб робот не смикався.
+        self.declare_parameter('clear_distance_m', 0.52)
 
-        # Ширина зони в один бік.
-        # 45 означає сектор від -45° до +45° відносно front_center_deg.
-        self.declare_parameter('front_angle_deg', 45.0)
+        # Якщо True — коли спереду перешкода, можна крутитися на місці.
+        self.declare_parameter('allow_rotation_when_blocked', True)
 
-        self.scan_topic = self.get_parameter('scan_topic').value
+        # Якщо True — коли спереду перешкода, можна їхати назад.
+        self.declare_parameter('allow_reverse_when_blocked', True)
+
+        # Обмеження швидкості.
+        self.declare_parameter('max_linear_x', 0.35)
+        self.declare_parameter('max_angular_z', 1.5)
+
+        # Якщо True — перед стопом робот плавно сповільнюється.
+        self.declare_parameter('enable_slowdown', True)
+        self.declare_parameter('slowdown_distance_m', 0.80)
+        self.declare_parameter('min_slowdown_factor', 0.25)
+
         self.input_cmd_topic = self.get_parameter('input_cmd_topic').value
         self.output_cmd_topic = self.get_parameter('output_cmd_topic').value
+        self.front_distance_topic = self.get_parameter('front_distance_topic').value
+        self.safety_stop_topic = self.get_parameter('safety_stop_topic').value
 
-        self.stop_dist = float(self.get_parameter('stop_dist').value)
-        self.use_full_scan = bool(self.get_parameter('use_full_scan').value)
-        self.front_center_deg = float(self.get_parameter('front_center_deg').value)
-        self.front_angle_deg = float(self.get_parameter('front_angle_deg').value)
+        self.cmd_timeout_sec = float(self.get_parameter('cmd_timeout_sec').value)
+        self.lidar_timeout_sec = float(self.get_parameter('lidar_timeout_sec').value)
 
-        self.front_dist = float('inf')
-        self.have_scan = False
-        self.points_in_zone = 0
+        self.stop_distance_m = float(self.get_parameter('stop_distance_m').value)
+        self.clear_distance_m = float(self.get_parameter('clear_distance_m').value)
 
-        self.last_cmd = Twist()
-        self.have_cmd = False
-
-        self.last_scan_log_time = 0.0
-        self.last_cmd_log_time = 0.0
-
-        self.create_subscription(
-            LaserScan,
-            self.scan_topic,
-            self.scan_callback,
-            10
+        self.allow_rotation_when_blocked = bool(
+            self.get_parameter('allow_rotation_when_blocked').value
+        )
+        self.allow_reverse_when_blocked = bool(
+            self.get_parameter('allow_reverse_when_blocked').value
         )
 
-        self.create_subscription(
+        self.max_linear_x = abs(float(self.get_parameter('max_linear_x').value))
+        self.max_angular_z = abs(float(self.get_parameter('max_angular_z').value))
+
+        self.enable_slowdown = bool(self.get_parameter('enable_slowdown').value)
+        self.slowdown_distance_m = float(self.get_parameter('slowdown_distance_m').value)
+        self.min_slowdown_factor = float(self.get_parameter('min_slowdown_factor').value)
+
+        self.min_slowdown_factor = max(0.0, min(1.0, self.min_slowdown_factor))
+
+        self.last_cmd = Twist()
+        self.last_cmd_time = 0.0
+
+        self.front_distance = -1.0
+        self.last_lidar_time = 0.0
+
+        self.front_blocked = False
+
+        self.cmd_sub = self.create_subscription(
             Twist,
             self.input_cmd_topic,
             self.cmd_callback,
+            10
+        )
+
+        self.front_sub = self.create_subscription(
+            Float32,
+            self.front_distance_topic,
+            self.front_distance_callback,
             10
         )
 
@@ -68,129 +114,193 @@ class LidarSafetyNode(Node):
             10
         )
 
-        self.timer = self.create_timer(0.05, self.safety_loop)
+        self.stop_pub = self.create_publisher(
+            Bool,
+            self.safety_stop_topic,
+            10
+        )
+
+        self.timer = self.create_timer(0.03, self.control_loop)
 
         self.get_logger().info(
             f'Lidar safety started: {self.input_cmd_topic} -> {self.output_cmd_topic}, '
-            f'stop_dist={self.stop_dist:.3f}, '
-            f'use_full_scan={self.use_full_scan}, '
-            f'front_center_deg={self.front_center_deg:.1f}, '
-            f'front_angle_deg={self.front_angle_deg:.1f}'
+            f'front_distance_topic={self.front_distance_topic}, '
+            f'stop={self.stop_distance_m}, clear={self.clear_distance_m}'
         )
 
-    def now_sec(self):
-        return self.get_clock().now().nanoseconds / 1e9
+    def cmd_callback(self, msg: Twist):
+        self.last_cmd = msg
+        self.last_cmd_time = time.time()
 
-    def normalize_angle_deg(self, angle_deg):
-        return angle_deg % 360.0
+    def front_distance_callback(self, msg: Float32):
+        self.front_distance = float(msg.data)
+        self.last_lidar_time = time.time()
 
-    def angle_in_front_zone(self, angle_deg):
-        angle_deg = self.normalize_angle_deg(angle_deg)
-        center = self.normalize_angle_deg(self.front_center_deg)
+    def make_stop_cmd(self):
+        msg = Twist()
+        msg.linear.x = 0.0
+        msg.linear.y = 0.0
+        msg.linear.z = 0.0
+        msg.angular.x = 0.0
+        msg.angular.y = 0.0
+        msg.angular.z = 0.0
+        return msg
 
-        diff = (angle_deg - center + 180.0) % 360.0 - 180.0
+    def clamp_cmd(self, cmd: Twist):
+        if cmd.linear.x > self.max_linear_x:
+            cmd.linear.x = self.max_linear_x
+        elif cmd.linear.x < -self.max_linear_x:
+            cmd.linear.x = -self.max_linear_x
 
-        return abs(diff) <= self.front_angle_deg
+        if cmd.angular.z > self.max_angular_z:
+            cmd.angular.z = self.max_angular_z
+        elif cmd.angular.z < -self.max_angular_z:
+            cmd.angular.z = -self.max_angular_z
 
-    def scan_callback(self, msg):
-        values = []
-        angle = msg.angle_min
+        # Диференційний робот не має їхати боком.
+        cmd.linear.y = 0.0
 
-        for r in msg.ranges:
-            angle_deg = math.degrees(angle)
+        return cmd
 
-            if self.use_full_scan:
-                angle_ok = True
-            else:
-                angle_ok = self.angle_in_front_zone(angle_deg)
+    def valid_front_distance(self):
+        return self.front_distance >= 0.0
 
-            if angle_ok and math.isfinite(r) and msg.range_min < r < msg.range_max:
-                values.append(r)
+    def update_blocked_state(self):
+        """
+        Hysteresis:
+          not blocked -> blocked when distance <= stop_distance_m
+          blocked -> clear when distance >= clear_distance_m
+        """
 
-            angle += msg.angle_increment
-
-        self.points_in_zone = len(values)
-
-        if values:
-            values.sort()
-
-            # 10% точка, щоб не реагувати на одиничний шум
-            idx = max(0, min(len(values) - 1, int(len(values) * 0.1)))
-            self.front_dist = values[idx]
-            self.have_scan = True
-        else:
-            self.front_dist = float('inf')
-            self.have_scan = False
-
-        now = self.now_sec()
-        if now - self.last_scan_log_time > 0.5:
-            self.get_logger().info(
-                f'SCAN: front_dist={self.front_dist:.3f}, '
-                f'stop_dist={self.stop_dist:.3f}, '
-                f'have_scan={self.have_scan}, '
-                f'points_in_zone={self.points_in_zone}, '
-                f'use_full_scan={self.use_full_scan}, '
-                f'front_center={self.front_center_deg:.1f}, '
-                f'front_angle={self.front_angle_deg:.1f}'
-            )
-            self.last_scan_log_time = now
-
-    def cmd_callback(self, cmd):
-        self.last_cmd = cmd
-        self.have_cmd = True
-
-        now = self.now_sec()
-        if now - self.last_cmd_log_time > 0.3:
-            self.get_logger().info(
-                f'RAW CMD: x={cmd.linear.x:.3f}, '
-                f'z={cmd.angular.z:.3f}, '
-                f'front_dist={self.front_dist:.3f}, '
-                f'stop_dist={self.stop_dist:.3f}, '
-                f'obstacle={self.obstacle_ahead()}'
-            )
-            self.last_cmd_log_time = now
-
-        self.publish_safe_cmd()
-
-    def obstacle_ahead(self):
-        return self.have_scan and self.front_dist < self.stop_dist
-
-    def wants_forward(self, cmd):
-        return cmd.linear.x > 0.0
-
-    def publish_safe_cmd(self):
-        if not self.have_cmd:
+        if not self.valid_front_distance():
+            # Якщо в передній зоні немає точки, не вважаємо це перешкодою.
+            # Але якщо лідар повністю пропав — це обробляється timeout-ом.
+            self.front_blocked = False
             return
 
-        if self.obstacle_ahead() and self.wants_forward(self.last_cmd):
-            stop_cmd = Twist()
-            self.cmd_pub.publish(stop_cmd)
+        if self.front_blocked:
+            if self.front_distance >= self.clear_distance_m:
+                self.front_blocked = False
+        else:
+            if self.front_distance <= self.stop_distance_m:
+                self.front_blocked = True
 
+    def slowdown_factor(self):
+        if not self.enable_slowdown:
+            return 1.0
+
+        if not self.valid_front_distance():
+            return 1.0
+
+        if self.front_distance >= self.slowdown_distance_m:
+            return 1.0
+
+        if self.slowdown_distance_m <= 0.01:
+            return 1.0
+
+        factor = self.front_distance / self.slowdown_distance_m
+        factor = max(self.min_slowdown_factor, min(1.0, factor))
+        return factor
+
+    def publish_stop_state(self, active):
+        msg = Bool()
+        msg.data = bool(active)
+        self.stop_pub.publish(msg)
+
+    def control_loop(self):
+        now = time.time()
+
+        if now - self.last_cmd_time > self.cmd_timeout_sec:
+            self.cmd_pub.publish(self.make_stop_cmd())
+            self.publish_stop_state(True)
+            return
+
+        if now - self.last_lidar_time > self.lidar_timeout_sec:
+            self.get_logger().warn('LIDAR TIMEOUT: stopping robot')
+            self.cmd_pub.publish(self.make_stop_cmd())
+            self.publish_stop_state(True)
+            return
+
+        self.update_blocked_state()
+
+        cmd = Twist()
+        cmd.linear.x = self.last_cmd.linear.x
+        cmd.linear.y = self.last_cmd.linear.y
+        cmd.linear.z = self.last_cmd.linear.z
+        cmd.angular.x = self.last_cmd.angular.x
+        cmd.angular.y = self.last_cmd.angular.y
+        cmd.angular.z = self.last_cmd.angular.z
+
+        cmd = self.clamp_cmd(cmd)
+
+        moving_forward = cmd.linear.x > 0.0
+        moving_backward = cmd.linear.x < 0.0
+
+        safety_active = False
+        reason = 'OK'
+
+        if self.front_blocked and moving_forward:
+            cmd.linear.x = 0.0
+            safety_active = True
+            reason = 'front blocked'
+
+            if not self.allow_rotation_when_blocked:
+                cmd.angular.z = 0.0
+
+        if self.front_blocked and moving_backward and not self.allow_reverse_when_blocked:
+            cmd.linear.x = 0.0
+            safety_active = True
+            reason = 'reverse disabled while blocked'
+
+        if not self.front_blocked and moving_forward:
+            factor = self.slowdown_factor()
+            if factor < 1.0:
+                cmd.linear.x *= factor
+                safety_active = True
+                reason = f'slowdown {factor:.2f}'
+
+        cmd = self.clamp_cmd(cmd)
+
+        self.cmd_pub.publish(cmd)
+        self.publish_stop_state(safety_active)
+
+        self.log_status(cmd, safety_active, reason)
+
+    def log_status(self, cmd, safety_active, reason):
+        now = time.time()
+
+        if not hasattr(self, '_last_log'):
+            self._last_log = 0.0
+
+        if now - self._last_log < 0.5:
+            return
+
+        self._last_log = now
+
+        if safety_active:
             self.get_logger().warn(
-                f'SAFETY STOP: front_dist={self.front_dist:.3f} '
-                f'< stop_dist={self.stop_dist:.3f}'
+                f'SAFETY: {reason} | '
+                f'front={self.front_distance:.3f} m | '
+                f'out linear.x={cmd.linear.x:.3f}, angular.z={cmd.angular.z:.3f}'
             )
         else:
-            self.cmd_pub.publish(self.last_cmd)
-
-    def safety_loop(self):
-        self.publish_safe_cmd()
-
-    def destroy_node(self):
-        self.cmd_pub.publish(Twist())
-        super().destroy_node()
+            self.get_logger().info(
+                f'OK | '
+                f'front={self.front_distance:.3f} m | '
+                f'out linear.x={cmd.linear.x:.3f}, angular.z={cmd.angular.z:.3f}'
+            )
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = LidarSafetyNode()
+
+    node = LidarSafety()
 
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.cmd_pub.publish(Twist())
         node.destroy_node()
         rclpy.shutdown()
 
