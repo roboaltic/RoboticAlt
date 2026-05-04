@@ -1,172 +1,196 @@
+import math
+
 import rclpy
 from rclpy.node import Node
 
-import serial
-import math
-
 from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import Twist
 
 
-class LD06Node(Node):
+class LidarSafetyNode(Node):
     def __init__(self):
-        super().__init__('ld06_node')
+        super().__init__('lidar_safety')
 
-        self.declare_parameter('port', '/dev/ttyUSB0')
-        self.declare_parameter('baudrate', 230400)
-        self.declare_parameter('frame_id', 'laser')
+        self.declare_parameter('scan_topic', '/scan')
+        self.declare_parameter('input_cmd_topic', '/cmd_vel_raw')
+        self.declare_parameter('output_cmd_topic', '/cmd_vel')
 
-        self.declare_parameter('angle_offset_deg', 0.0)
-        self.declare_parameter('range_min', 0.02)
-        self.declare_parameter('range_max', 8.0)
+        self.declare_parameter('stop_dist', 0.20)
 
-        # 360 точок = 1 градус на точку
-        self.declare_parameter('scan_points', 360)
+        # True = перевірка всього 360°
+        # False = перевірка тільки передньої зони
+        self.declare_parameter('use_full_scan', False)
 
-        # 0.05 = 20 Hz
-        self.declare_parameter('publish_period', 0.05)
+        # Центр передньої зони
+        self.declare_parameter('front_center_deg', 0.0)
 
-        port = self.get_parameter('port').value
-        baud = int(self.get_parameter('baudrate').value)
+        # Ширина передньої зони в один бік
+        self.declare_parameter('front_angle_deg', 45.0)
 
-        self.frame_id = self.get_parameter('frame_id').value
-        self.angle_offset_deg = float(self.get_parameter('angle_offset_deg').value)
+        self.scan_topic = self.get_parameter('scan_topic').value
+        self.input_cmd_topic = self.get_parameter('input_cmd_topic').value
+        self.output_cmd_topic = self.get_parameter('output_cmd_topic').value
 
-        self.range_min = float(self.get_parameter('range_min').value)
-        self.range_max = float(self.get_parameter('range_max').value)
+        self.stop_dist = float(self.get_parameter('stop_dist').value)
+        self.use_full_scan = bool(self.get_parameter('use_full_scan').value)
+        self.front_center_deg = float(self.get_parameter('front_center_deg').value)
+        self.front_angle_deg = float(self.get_parameter('front_angle_deg').value)
 
-        self.scan_points = int(self.get_parameter('scan_points').value)
-        self.publish_period = float(self.get_parameter('publish_period').value)
+        self.front_dist = float('inf')
+        self.have_scan = False
+        self.points_in_zone = 0
 
-        self.ser = serial.Serial(port, baud, timeout=0)
+        self.last_cmd = Twist()
+        self.have_cmd = False
 
-        self.publisher = self.create_publisher(LaserScan, '/scan', 10)
+        self.last_debug_log_time = 0.0
+        self.last_cmd_log_time = 0.0
 
-        self.buffer = bytearray()
-
-        self.ranges = [float('inf')] * self.scan_points
-        self.last_publish_points = 0
-
-        self.read_timer = self.create_timer(0.005, self.read_data)
-        self.publish_timer = self.create_timer(self.publish_period, self.publish_scan)
-
-        self.get_logger().info(f'LD06 started on {port} @ {baud}')
-        self.get_logger().info(
-            f'Publishing rolling LaserScan: points={self.scan_points}, '
-            f'period={self.publish_period}s'
+        self.create_subscription(
+            LaserScan,
+            self.scan_topic,
+            self.scan_callback,
+            10
         )
 
-    def read_data(self):
-        data = self.ser.read(1024)
+        self.create_subscription(
+            Twist,
+            self.input_cmd_topic,
+            self.cmd_callback,
+            10
+        )
 
-        if data:
-            self.buffer.extend(data)
-            self.parse_packets()
+        self.cmd_pub = self.create_publisher(
+            Twist,
+            self.output_cmd_topic,
+            10
+        )
 
-    def parse_packets(self):
-        PACKET_SIZE = 47
+        # 20 Hz safety loop
+        self.safety_timer = self.create_timer(0.05, self.safety_loop)
 
-        while len(self.buffer) >= PACKET_SIZE:
-            if self.buffer[0] != 0x54:
-                self.buffer.pop(0)
-                continue
+        self.get_logger().info(
+            f'Lidar safety started: {self.input_cmd_topic} -> {self.output_cmd_topic}'
+        )
+        self.get_logger().info(
+            f'stop_dist={self.stop_dist:.3f}, '
+            f'use_full_scan={self.use_full_scan}, '
+            f'front_center_deg={self.front_center_deg:.1f}, '
+            f'front_angle_deg={self.front_angle_deg:.1f}'
+        )
 
-            if self.buffer[1] != 0x2C:
-                self.buffer.pop(0)
-                continue
+    def normalize_angle_deg(self, angle_deg):
+        return angle_deg % 360.0
 
-            packet = self.buffer[:PACKET_SIZE]
-            del self.buffer[:PACKET_SIZE]
+    def angle_in_front_zone(self, angle_deg):
+        angle_deg = self.normalize_angle_deg(angle_deg)
+        center = self.normalize_angle_deg(self.front_center_deg)
 
-            self.process_packet(packet)
+        diff = (angle_deg - center + 180.0) % 360.0 - 180.0
+        return abs(diff) <= self.front_angle_deg
 
-    def process_packet(self, packet):
-        POINTS = 12
+    def scan_callback(self, msg):
+        values = []
+        angle = msg.angle_min
 
-        start_angle = ((packet[5] << 8) | packet[4]) / 100.0
-        end_angle = ((packet[43] << 8) | packet[42]) / 100.0
+        for r in msg.ranges:
+            angle_deg = math.degrees(angle)
 
-        if end_angle < start_angle:
-            end_angle += 360.0
+            if self.use_full_scan:
+                angle_ok = True
+            else:
+                angle_ok = self.angle_in_front_zone(angle_deg)
 
-        step = (end_angle - start_angle) / (POINTS - 1)
+            if angle_ok and math.isfinite(r) and msg.range_min < r < msg.range_max:
+                values.append(r)
 
-        for i in range(POINTS):
-            offset = 6 + i * 3
+            angle += msg.angle_increment
 
-            dist_mm = packet[offset] | (packet[offset + 1] << 8)
-            dist_m = dist_mm / 1000.0
+        self.points_in_zone = len(values)
 
-            if not (self.range_min < dist_m < self.range_max):
-                continue
+        if values:
+            values.sort()
 
-            angle_deg = start_angle + i * step
-            angle_deg = (angle_deg + self.angle_offset_deg) % 360.0
+            # 10% точка, щоб не брати випадковий шум
+            idx = max(0, min(len(values) - 1, int(len(values) * 0.1)))
+            self.front_dist = values[idx]
+            self.have_scan = True
+        else:
+            self.front_dist = float('inf')
+            self.have_scan = False
 
-            # Переводимо 0..360 у індекс масиву
-            index = int((angle_deg / 360.0) * self.scan_points) % self.scan_points
+        now = self.get_clock().now().nanoseconds / 1e9
 
-            old = self.ranges[index]
-
-            # Якщо в один сектор попало кілька точок — беремо ближчу
-            if math.isinf(old) or dist_m < old:
-                self.ranges[index] = dist_m
-
-    def publish_scan(self):
-        valid_points = sum(1 for r in self.ranges if math.isfinite(r))
-
-        if valid_points < 10:
-            self.get_logger().warn(
-                f'Not enough valid lidar points: {valid_points}'
+        if now - self.last_debug_log_time > 0.5:
+            self.get_logger().info(
+                f'SAFETY DIST | front={self.front_dist:.3f} m | '
+                f'stop={self.stop_dist:.3f} m | '
+                f'points={self.points_in_zone} | '
+                f'have_scan={self.have_scan} | '
+                f'use_full_scan={self.use_full_scan} | '
+                f'center={self.front_center_deg:.1f} | '
+                f'angle={self.front_angle_deg:.1f}'
             )
+            self.last_debug_log_time = now
+
+    def cmd_callback(self, cmd):
+        self.last_cmd = cmd
+        self.have_cmd = True
+
+        now = self.get_clock().now().nanoseconds / 1e9
+        if now - self.last_cmd_log_time > 0.3:
+            self.get_logger().info(
+                f'SAFETY CMD | raw_x={cmd.linear.x:.3f} | '
+                f'raw_z={cmd.angular.z:.3f} | '
+                f'front={self.front_dist:.3f} m | '
+                f'stop={self.stop_dist:.3f} m | '
+                f'obstacle={self.obstacle_ahead()} | '
+                f'wants_forward={self.wants_forward(cmd)}'
+            )
+            self.last_cmd_log_time = now
+
+        self.publish_safe_cmd()
+
+    def obstacle_ahead(self):
+        return self.have_scan and self.front_dist < self.stop_dist
+
+    def wants_forward(self, cmd):
+        return cmd.linear.x > 0.0
+
+    def publish_safe_cmd(self):
+        if not self.have_cmd:
             return
 
-        msg = LaserScan()
+        if self.obstacle_ahead() and self.wants_forward(self.last_cmd):
+            safe_cmd = Twist()
 
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = self.frame_id
+            self.get_logger().warn(
+                f'SAFETY STOP | front={self.front_dist:.3f} m '
+                f'< stop={self.stop_dist:.3f} m'
+            )
+        else:
+            safe_cmd = self.last_cmd
 
-        # ВАЖЛИВО:
-        # Це повний 360° scan у форматі -180° ... +180°
-        msg.angle_min = -math.pi
-        msg.angle_max = math.pi
-        msg.angle_increment = (msg.angle_max - msg.angle_min) / self.scan_points
+        self.cmd_pub.publish(safe_cmd)
 
-        msg.time_increment = 0.0
-        msg.scan_time = self.publish_period
-
-        msg.range_min = self.range_min
-        msg.range_max = self.range_max
-
-        # Переставляємо масив так, щоб:
-        # index 0   = -180°
-        # index 180 = 0° / перед
-        # index 359 = +179°
-        half = self.scan_points // 2
-        msg.ranges = self.ranges[half:] + self.ranges[:half]
-
-        self.publisher.publish(msg)
-
-        self.get_logger().info(
-            f'/scan published: valid_points={valid_points}, '
-            f'angle_min=-180, angle_max=180'
-        )
+    def safety_loop(self):
+        self.publish_safe_cmd()
 
     def destroy_node(self):
-        if self.ser and self.ser.is_open:
-            self.ser.close()
-
+        self.cmd_pub.publish(Twist())
         super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = LD06Node()
+    node = LidarSafetyNode()
 
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
+        node.cmd_pub.publish(Twist())
         node.destroy_node()
         rclpy.shutdown()
 
