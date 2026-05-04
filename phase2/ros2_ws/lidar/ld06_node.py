@@ -13,22 +13,50 @@ class LD06Node(Node):
 
         self.declare_parameter('port', '/dev/ttyUSB0')
         self.declare_parameter('baudrate', 230400)
+        self.declare_parameter('frame_id', 'laser')
+
+        self.declare_parameter('angle_offset_deg', 0.0)
+        self.declare_parameter('range_min', 0.02)
+        self.declare_parameter('range_max', 8.0)
+
+        # 360 точок = 1 градус на точку
+        self.declare_parameter('scan_points', 360)
+
+        # 0.05 = 20 Hz
+        self.declare_parameter('publish_period', 0.05)
 
         port = self.get_parameter('port').value
         baud = int(self.get_parameter('baudrate').value)
 
-        self.ser = serial.Serial(port, baud, timeout=1)
+        self.frame_id = self.get_parameter('frame_id').value
+        self.angle_offset_deg = float(self.get_parameter('angle_offset_deg').value)
+
+        self.range_min = float(self.get_parameter('range_min').value)
+        self.range_max = float(self.get_parameter('range_max').value)
+
+        self.scan_points = int(self.get_parameter('scan_points').value)
+        self.publish_period = float(self.get_parameter('publish_period').value)
+
+        self.ser = serial.Serial(port, baud, timeout=0)
 
         self.publisher = self.create_publisher(LaserScan, '/scan', 10)
 
         self.buffer = bytearray()
 
-        self.get_logger().info(f'LD06 started on {port} @ {baud}')
+        self.ranges = [float('inf')] * self.scan_points
+        self.last_publish_points = 0
 
-        self.timer = self.create_timer(0.02, self.read_data)
+        self.read_timer = self.create_timer(0.005, self.read_data)
+        self.publish_timer = self.create_timer(self.publish_period, self.publish_scan)
+
+        self.get_logger().info(f'LD06 started on {port} @ {baud}')
+        self.get_logger().info(
+            f'Publishing rolling LaserScan: points={self.scan_points}, '
+            f'period={self.publish_period}s'
+        )
 
     def read_data(self):
-        data = self.ser.read(256)
+        data = self.ser.read(1024)
 
         if data:
             self.buffer.extend(data)
@@ -62,42 +90,66 @@ class LD06Node(Node):
 
         step = (end_angle - start_angle) / (POINTS - 1)
 
-        angles = []
-        distances = []
-
         for i in range(POINTS):
             offset = 6 + i * 3
 
-            dist = packet[offset] | (packet[offset + 1] << 8)
+            dist_mm = packet[offset] | (packet[offset + 1] << 8)
+            dist_m = dist_mm / 1000.0
 
-            angle = start_angle + i * step
-            angle = angle % 360.0
+            if not (self.range_min < dist_m < self.range_max):
+                continue
 
-            angles.append(math.radians(angle))
-            distances.append(dist / 1000.0)
+            angle_deg = start_angle + i * step
+            angle_deg = (angle_deg + self.angle_offset_deg) % 360.0
 
-        self.publish_scan(angles, distances)
+            # Переводимо 0..360 у індекс масиву
+            index = int((angle_deg / 360.0) * self.scan_points) % self.scan_points
 
-    def publish_scan(self, angles, distances):
+            old = self.ranges[index]
+
+            # Якщо в один сектор попало кілька точок — беремо ближчу
+            if math.isinf(old) or dist_m < old:
+                self.ranges[index] = dist_m
+
+    def publish_scan(self):
+        valid_points = sum(1 for r in self.ranges if math.isfinite(r))
+
+        if valid_points < 10:
+            self.get_logger().warn(
+                f'Not enough valid lidar points: {valid_points}'
+            )
+            return
+
         msg = LaserScan()
 
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "laser"
+        msg.header.frame_id = self.frame_id
 
-        msg.angle_min = min(angles)
-        msg.angle_max = max(angles)
+        # ВАЖЛИВО:
+        # Це повний 360° scan у форматі -180° ... +180°
+        msg.angle_min = -math.pi
+        msg.angle_max = math.pi
+        msg.angle_increment = (msg.angle_max - msg.angle_min) / self.scan_points
 
-        if len(angles) > 1:
-            msg.angle_increment = (msg.angle_max - msg.angle_min) / (len(angles) - 1)
-        else:
-            msg.angle_increment = 0.0
+        msg.time_increment = 0.0
+        msg.scan_time = self.publish_period
 
-        msg.range_min = 0.02
-        msg.range_max = 8.0
+        msg.range_min = self.range_min
+        msg.range_max = self.range_max
 
-        msg.ranges = distances
+        # Переставляємо масив так, щоб:
+        # index 0   = -180°
+        # index 180 = 0° / перед
+        # index 359 = +179°
+        half = self.scan_points // 2
+        msg.ranges = self.ranges[half:] + self.ranges[:half]
 
         self.publisher.publish(msg)
+
+        self.get_logger().info(
+            f'/scan published: valid_points={valid_points}, '
+            f'angle_min=-180, angle_max=180'
+        )
 
     def destroy_node(self):
         if self.ser and self.ser.is_open:
