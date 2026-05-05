@@ -6,6 +6,7 @@ import rclpy
 from rclpy.node import Node
 
 from geometry_msgs.msg import Twist
+from std_msgs import msg
 from std_msgs.msg import Float32, Bool
 
 
@@ -29,6 +30,8 @@ class LidarSafety(Node):
     def __init__(self):
         super().__init__('lidar_safety')
 
+       
+
         self.declare_parameter('input_cmd_topic', '/cmd_vel_raw')
         self.declare_parameter('output_cmd_topic', '/cmd_vel')
         self.declare_parameter('front_distance_topic', '/lidar/front_distance')
@@ -43,6 +46,8 @@ class LidarSafety(Node):
         # На якій дистанції знову дозволити рух вперед.
         # Має бути трохи більше stop_distance_m, щоб робот не смикався.
         self.declare_parameter('clear_distance_m', 0.30)
+
+        self.declare_parameter('invalid_front_timeout_sec', 1.0)
 
         # Якщо True — коли спереду перешкода, можна крутитися на місці.
         self.declare_parameter('allow_rotation_when_blocked', True)
@@ -69,6 +74,12 @@ class LidarSafety(Node):
 
         self.stop_distance_m = float(self.get_parameter('stop_distance_m').value)
         self.clear_distance_m = float(self.get_parameter('clear_distance_m').value)
+
+        self.invalid_front_timeout_sec = float(
+            self.get_parameter('invalid_front_timeout_sec').value
+        )
+
+        self.last_valid_front_time = 0.0
 
         self.allow_rotation_when_blocked = bool(
             self.get_parameter('allow_rotation_when_blocked').value
@@ -98,20 +109,20 @@ class LidarSafety(Node):
             Twist,
             self.input_cmd_topic,
             self.cmd_callback,
-            10
+            1
         )
 
         self.front_sub = self.create_subscription(
             Float32,
             self.front_distance_topic,
             self.front_distance_callback,
-            10
+            1
         )
 
         self.cmd_pub = self.create_publisher(
             Twist,
             self.output_cmd_topic,
-            10
+            1
         )
 
         self.stop_pub = self.create_publisher(
@@ -120,7 +131,7 @@ class LidarSafety(Node):
             10
         )
 
-        self.timer = self.create_timer(0.03, self.control_loop)
+        self.timer = self.create_timer(0.01, self.control_loop)
 
         self.get_logger().info(
             f'Lidar safety started: {self.input_cmd_topic} -> {self.output_cmd_topic}, '
@@ -133,8 +144,26 @@ class LidarSafety(Node):
         self.last_cmd_time = time.time()
 
     def front_distance_callback(self, msg: Float32):
-        self.front_distance = float(msg.data)
-        self.last_lidar_time = time.time()
+        now = time.time()
+        distance = float(msg.data)
+
+        self.last_lidar_time = now
+
+        if distance >= 0.0:
+            self.front_distance = distance
+            self.last_valid_front_time = now
+
+            if distance <= self.stop_distance_m:
+                self.front_blocked = True
+
+                if self.last_cmd.linear.x > 0.0:
+                    stop_cmd = self.make_stop_cmd()
+
+                    if self.allow_rotation_when_blocked:
+                        stop_cmd.angular.z = self.last_cmd.angular.z
+
+                    self.cmd_pub.publish(stop_cmd)
+                    self.publish_stop_state(True)
 
     def make_stop_cmd(self):
         msg = Twist()
@@ -163,19 +192,26 @@ class LidarSafety(Node):
         return cmd
 
     def valid_front_distance(self):
-        return self.front_distance >= 0.0
+        now = time.time()
+        return (
+            self.front_distance >= 0.0
+            and now - self.last_valid_front_time <= self.invalid_front_timeout_sec
+    )
 
     def update_blocked_state(self):
         """
         Hysteresis:
-          not blocked -> blocked when distance <= stop_distance_m
-          blocked -> clear when distance >= clear_distance_m
+        not blocked -> blocked when distance <= stop_distance_m
+        blocked -> clear only when valid distance >= clear_distance_m
+
+        Important:
+        invalid / -1.0 must NOT clear blocked state.
         """
 
         if not self.valid_front_distance():
-            # Якщо в передній зоні немає точки, не вважаємо це перешкодою.
-            # Але якщо лідар повністю пропав — це обробляється timeout-ом.
-            self.front_blocked = False
+        # Якщо дані тимчасово пропали:
+        # - не очищаємо blocked
+        # - якщо вже були заблоковані, залишаємо blocked=True
             return
 
         if self.front_blocked:
