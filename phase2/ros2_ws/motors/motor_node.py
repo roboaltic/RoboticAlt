@@ -19,14 +19,14 @@ ENB = 13
 IN3 = 26
 IN4 = 19
 
-PWM_FREQ = 1000
+PWM_FREQ = 700
 
 # Мінімальна потужність PWM у %
 # Якщо мотори пищать, але не рушають — підніми до 55 або 65
-MIN_PWM = 45
+MIN_PWM = 90
 
 WHEEL_BASE = 0.16
-MAX_LINEAR = 1.0
+MAX_LINEAR = 0.2
 MAX_ANGULAR = 2.0
 
 CMD_TIMEOUT = 0.5
@@ -43,7 +43,7 @@ class DiffDrive(Node):
             Twist,
             '/cmd_vel',
             self.cmd_cb,
-            10
+            1
         )
 
         self.odom_pub = self.create_publisher(
@@ -52,7 +52,7 @@ class DiffDrive(Node):
             10
         )
 
-        self.timer = self.create_timer(0.05, self.update)
+        self.timer = self.create_timer(0.01, self.update)
 
         self.chip = lgpio.gpiochip_open(4)
 
@@ -82,6 +82,10 @@ class DiffDrive(Node):
         self.v = max(-MAX_LINEAR, min(MAX_LINEAR, msg.linear.x))
         self.w = max(-MAX_ANGULAR, min(MAX_ANGULAR, msg.angular.z))
         self.last_cmd = time.time()
+
+        # Миттєва реакція на стоп-команду від lidar_safety
+        if abs(self.v) < 0.001 and abs(self.w) < 0.001:
+            self.stop()
 
     def pwm_from_speed(self, s):
         duty = int(abs(s) * 100)
