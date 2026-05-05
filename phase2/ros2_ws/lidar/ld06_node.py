@@ -9,7 +9,7 @@ import rclpy
 from rclpy.node import Node
 
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Float32MultiArray, Int32MultiArray
+from std_msgs.msg import Float32, Float32MultiArray
 
 try:
     import serial
@@ -19,24 +19,19 @@ except ImportError:
 
 class LD06Node(Node):
     """
-    LD06 / LD19 style LiDAR node for ROS2.
+    LD06 lidar node.
 
     Publishes:
-      /scan                 sensor_msgs/LaserScan
-      /lidar/zones           std_msgs/Float32MultiArray
-      /lidar/blocked         std_msgs/Int32MultiArray
+      /scan                    sensor_msgs/LaserScan
+      /lidar/front_distance    std_msgs/Float32
+      /lidar/closest           std_msgs/Float32MultiArray
 
-    /lidar/zones data order:
-      [front, front_left, front_right, left, right, rear]
+    /lidar/front_distance:
+      distance in meters in front sector.
+      -1.0 means no valid point in front sector.
 
-    /lidar/blocked data order:
-      [front, front_left, front_right, left, right, rear]
-
-    Angle convention after offset:
-      0 deg   = front
-      +90 deg = left
-      -90 deg = right
-      180 deg = rear
+    /lidar/closest:
+      [distance_m, angle_deg]
     """
 
     CRC_TABLE = [
@@ -78,111 +73,92 @@ class LD06Node(Node):
         super().__init__('ld06_node')
 
         if serial is None:
-            raise RuntimeError(
-                'pyserial is not installed. Install it with: pip3 install pyserial'
-            )
-
-        # ---------------- Parameters ----------------
+            raise RuntimeError('pyserial not installed. Use: pip3 install pyserial')
+        
+        self.declare_parameter('front_hold_sec', 0.8)
+        self.declare_parameter('front_filter_window', 5)
 
         self.declare_parameter('port', '/dev/ttyUSB0')
         self.declare_parameter('baudrate', 230400)
         self.declare_parameter('frame_id', 'laser_frame')
 
-        # Важливо:
-        # якщо стрілка на лідарі фізично дивиться вперед, але дані зміщені,
-        # підбирай цей параметр: 0, 90, -90, 180 тощо.
-        self.declare_parameter('angle_offset_deg', 0.0)
-
         self.declare_parameter('scan_topic', '/scan')
-        self.declare_parameter('zones_topic', '/lidar/zones')
-        self.declare_parameter('blocked_topic', '/lidar/blocked')
+        self.declare_parameter('front_distance_topic', '/lidar/front_distance')
+        self.declare_parameter('closest_topic', '/lidar/closest')
 
-        self.declare_parameter('publish_rate_hz', 10.0)
+        self.declare_parameter('publish_rate_hz', 15.0)
 
         self.declare_parameter('range_min_m', 0.05)
         self.declare_parameter('range_max_m', 12.0)
 
-        # LD06 іноді дає погані точки з низькою якістю.
-        # Якщо точок мало — зменшуй до 5 або 0.
-        self.declare_parameter('min_confidence', 10)
+        # Для тестів з коробкою краще 0 або 5.
+        self.declare_parameter('min_confidence', 0)
 
-        # Роздільність LaserScan.
-        # 1.0 = 360 точок.
-        # 0.5 = 720 точок.
+        # 1 градус = 360 bins.
         self.declare_parameter('angle_resolution_deg', 1.0)
 
-        # Safety threshold для blocked-зон.
-        self.declare_parameter('stop_distance_m', 0.40)
+        # Калібрування напрямку.
+        # Після калібрування перешкода спереду має давати angle ~= 0.
+        self.declare_parameter('angle_offset_deg', 0.0)
 
-        # Зони у градусах відносно переду робота.
-        self.declare_parameter('front_min_deg', -20.0)
-        self.declare_parameter('front_max_deg', 20.0)
+        # Якщо ліво/право дзеркально переплутані.
+        self.declare_parameter('invert_angle_direction', False)
 
-        self.declare_parameter('front_left_min_deg', 20.0)
-        self.declare_parameter('front_left_max_deg', 70.0)
+        # Передній сектор.
+        # Для тесту з коробкою 5 см на 0.55 м краще зробити ширше.
+        self.declare_parameter('front_min_deg', -35.0)
+        self.declare_parameter('front_max_deg', 35.0)
 
-        self.declare_parameter('front_right_min_deg', -70.0)
-        self.declare_parameter('front_right_max_deg', -20.0)
+        # Скільки секунд точка вважається актуальною.
+        # LD06 зазвичай проходить коло швидше, але 0.35 дає стабільність.
+        self.declare_parameter('point_max_age_sec', 0.35)
 
-        self.declare_parameter('left_min_deg', 70.0)
-        self.declare_parameter('left_max_deg', 120.0)
-
-        self.declare_parameter('right_min_deg', -120.0)
-        self.declare_parameter('right_max_deg', -70.0)
-
-        self.declare_parameter('rear_min_deg', 150.0)
-        self.declare_parameter('rear_max_deg', -150.0)
+        # Мінімальна кількість точок у передньому секторі.
+        # 1 = ловить навіть малу коробку/стрічку.
+        # 2 або 3 = менше шуму, але може не зловити тонкий об'єкт.
+        self.declare_parameter('front_min_points', 1)
 
         self.port = self.get_parameter('port').value
         self.baudrate = int(self.get_parameter('baudrate').value)
         self.frame_id = self.get_parameter('frame_id').value
 
-        self.angle_offset_deg = float(self.get_parameter('angle_offset_deg').value)
+        self.scan_topic = self.get_parameter('scan_topic').value
+        self.front_distance_topic = self.get_parameter('front_distance_topic').value
+        self.closest_topic = self.get_parameter('closest_topic').value
 
         self.publish_rate_hz = float(self.get_parameter('publish_rate_hz').value)
         self.range_min_m = float(self.get_parameter('range_min_m').value)
         self.range_max_m = float(self.get_parameter('range_max_m').value)
         self.min_confidence = int(self.get_parameter('min_confidence').value)
-        self.angle_resolution_deg = float(
-            self.get_parameter('angle_resolution_deg').value
-        )
-        self.stop_distance_m = float(self.get_parameter('stop_distance_m').value)
 
-        self.scan_topic = self.get_parameter('scan_topic').value
-        self.zones_topic = self.get_parameter('zones_topic').value
-        self.blocked_topic = self.get_parameter('blocked_topic').value
+        self.angle_resolution_deg = float(self.get_parameter('angle_resolution_deg').value)
+        self.angle_offset_deg = float(self.get_parameter('angle_offset_deg').value)
+        self.invert_angle_direction = bool(self.get_parameter('invert_angle_direction').value)
 
-        # ---------------- Publishers ----------------
+        self.front_min_deg = float(self.get_parameter('front_min_deg').value)
+        self.front_max_deg = float(self.get_parameter('front_max_deg').value)
+        self.point_max_age_sec = float(self.get_parameter('point_max_age_sec').value)
+        self.front_min_points = int(self.get_parameter('front_min_points').value)
 
-        self.scan_pub = self.create_publisher(
-            LaserScan,
-            self.scan_topic,
-            10
-        )
+        self.front_hold_sec = float(self.get_parameter('front_hold_sec').value)
+        self.front_filter_window = int(self.get_parameter('front_filter_window').value)
 
-        self.zones_pub = self.create_publisher(
-            Float32MultiArray,
-            self.zones_topic,
-            10
-        )
-
-        self.blocked_pub = self.create_publisher(
-            Int32MultiArray,
-            self.blocked_topic,
-            10
-        )
-
-        # ---------------- Scan buffers ----------------
+        self.last_valid_front_distance = -1.0
+        self.last_valid_front_time = 0.0
+        self.front_history = []
 
         self.bin_count = int(round(360.0 / self.angle_resolution_deg))
+
         self.ranges = [math.inf] * self.bin_count
         self.intensities = [0.0] * self.bin_count
-        self.last_update_time = [0.0] * self.bin_count
+        self.update_time = [0.0] * self.bin_count
 
-        self.data_lock = threading.Lock()
+        self.lock = threading.Lock()
         self.running = True
 
-        # ---------------- Serial ----------------
+        self.scan_pub = self.create_publisher(LaserScan, self.scan_topic, 10)
+        self.front_pub = self.create_publisher(Float32, self.front_distance_topic, 10)
+        self.closest_pub = self.create_publisher(Float32MultiArray, self.closest_topic, 10)
 
         self.serial = serial.Serial(
             port=self.port,
@@ -190,23 +166,19 @@ class LD06Node(Node):
             timeout=0.05
         )
 
-        self.reader_thread = threading.Thread(
-            target=self.read_loop,
-            daemon=True
-        )
-        self.reader_thread.start()
+        self.thread = threading.Thread(target=self.read_loop, daemon=True)
+        self.thread.start()
 
-        period = 1.0 / max(self.publish_rate_hz, 1.0)
-        self.timer = self.create_timer(period, self.publish_scan_and_zones)
+        self.timer = self.create_timer(
+            1.0 / max(self.publish_rate_hz, 1.0),
+            self.publish_data
+        )
 
         self.get_logger().info(
-            f'LD06 node started: port={self.port}, baud={self.baudrate}, '
-            f'angle_offset={self.angle_offset_deg} deg, bins={self.bin_count}'
+            f'LD06 started on {self.port}, baud={self.baudrate}, '
+            f'offset={self.angle_offset_deg}, invert={self.invert_angle_direction}, '
+            f'front=[{self.front_min_deg}, {self.front_max_deg}]'
         )
-
-    # -------------------------------------------------------------------------
-    # CRC
-    # -------------------------------------------------------------------------
 
     def crc8(self, data: bytes) -> int:
         crc = 0
@@ -214,43 +186,43 @@ class LD06Node(Node):
             crc = self.CRC_TABLE[(crc ^ b) & 0xFF]
         return crc
 
-    # -------------------------------------------------------------------------
-    # Angle helpers
-    # -------------------------------------------------------------------------
-
     @staticmethod
-    def normalize_0_360(angle_deg: float) -> float:
+    def normalize_0_360(angle_deg):
         angle_deg = angle_deg % 360.0
         if angle_deg < 0.0:
             angle_deg += 360.0
         return angle_deg
 
     @staticmethod
-    def normalize_minus_180_180(angle_deg: float) -> float:
-        angle_deg = (angle_deg + 180.0) % 360.0 - 180.0
-        return angle_deg
+    def normalize_180(angle_deg):
+        return (angle_deg + 180.0) % 360.0 - 180.0
 
-    def angle_to_bin(self, angle_deg_robot: float) -> int:
-        angle_0_360 = self.normalize_0_360(angle_deg_robot)
-        idx = int(round(angle_0_360 / self.angle_resolution_deg)) % self.bin_count
-        return idx
-
-    def angle_in_zone(self, angle_deg: float, zone_min: float, zone_max: float) -> bool:
-        """
-        angle_deg is in -180..180.
-        Normal zone:
-          -20..20
-        Wrap-around zone:
-          150..-150 means angle >= 150 or angle <= -150.
-        """
-        if zone_min <= zone_max:
-            return zone_min <= angle_deg <= zone_max
+    def corrected_angle(self, raw_angle_deg):
+        if self.invert_angle_direction:
+            angle = -raw_angle_deg
         else:
-            return angle_deg >= zone_min or angle_deg <= zone_max
+            angle = raw_angle_deg
 
-    # -------------------------------------------------------------------------
-    # LD06 reading
-    # -------------------------------------------------------------------------
+        angle += self.angle_offset_deg
+        return self.normalize_0_360(angle)
+
+    def angle_to_index(self, angle_deg):
+        return int(round(self.normalize_0_360(angle_deg) / self.angle_resolution_deg)) % self.bin_count
+
+    def angle_in_front(self, angle_deg):
+        angle_deg = self.normalize_180(angle_deg)
+
+        if self.front_min_deg <= self.front_max_deg:
+            return self.front_min_deg <= angle_deg <= self.front_max_deg
+
+        return angle_deg >= self.front_min_deg or angle_deg <= self.front_max_deg
+
+    def valid_packet(self, packet):
+        if len(packet) != 47:
+            return False
+        if packet[0] != 0x54 or packet[1] != 0x2C:
+            return False
+        return self.crc8(packet[:46]) == packet[46]
 
     def read_loop(self):
         buffer = bytearray()
@@ -258,11 +230,11 @@ class LD06Node(Node):
         while self.running and rclpy.ok():
             try:
                 data = self.serial.read(256)
+
                 if data:
                     buffer.extend(data)
 
                 while len(buffer) >= 47:
-                    # LD06 packet starts with 0x54 0x2C
                     if buffer[0] != 0x54 or buffer[1] != 0x2C:
                         buffer.pop(0)
                         continue
@@ -270,47 +242,18 @@ class LD06Node(Node):
                     packet = bytes(buffer[:47])
                     del buffer[:47]
 
-                    if not self.valid_packet(packet):
-                        continue
-
-                    self.parse_packet(packet)
+                    if self.valid_packet(packet):
+                        self.parse_packet(packet)
 
             except Exception as e:
                 self.get_logger().warn(f'LD06 read error: {e}')
                 time.sleep(0.1)
 
-    def valid_packet(self, packet: bytes) -> bool:
-        if len(packet) != 47:
-            return False
+    def parse_packet(self, packet):
+        start_angle = struct.unpack_from('<H', packet, 4)[0] / 100.0
+        end_angle = struct.unpack_from('<H', packet, 42)[0] / 100.0
 
-        if packet[0] != 0x54 or packet[1] != 0x2C:
-            return False
-
-        expected_crc = packet[46]
-        calculated_crc = self.crc8(packet[:46])
-
-        return calculated_crc == expected_crc
-
-    def parse_packet(self, packet: bytes):
-        """
-        Packet layout:
-          0      header 0x54
-          1      ver_len 0x2C
-          2-3    speed
-          4-5    start angle, centi-degrees
-          6-41   12 points: distance uint16 mm + confidence uint8
-          42-43  end angle, centi-degrees
-          44-45  timestamp
-          46     crc
-        """
-
-        start_angle_raw = struct.unpack_from('<H', packet, 4)[0]
-        end_angle_raw = struct.unpack_from('<H', packet, 42)[0]
-
-        start_angle_deg = start_angle_raw / 100.0
-        end_angle_deg = end_angle_raw / 100.0
-
-        angle_span = end_angle_deg - start_angle_deg
+        angle_span = end_angle - start_angle
 
         if angle_span < -180.0:
             angle_span += 360.0
@@ -319,10 +262,9 @@ class LD06Node(Node):
 
         point_count = 12
         angle_step = angle_span / float(point_count - 1)
-
         now = time.time()
 
-        with self.data_lock:
+        with self.lock:
             for i in range(point_count):
                 offset = 6 + i * 3
 
@@ -340,166 +282,159 @@ class LD06Node(Node):
                 if distance_m < self.range_min_m or distance_m > self.range_max_m:
                     continue
 
-                lidar_angle_deg = start_angle_deg + angle_step * i
+                raw_angle = start_angle + angle_step * i
+                robot_angle = self.corrected_angle(raw_angle)
+                idx = self.angle_to_index(robot_angle)
 
-                # Переводимо кут лідара у кут робота.
-                # Після цього 0 градусів має бути напрямком вперед.
-                robot_angle_deg = lidar_angle_deg + self.angle_offset_deg
-                robot_angle_deg = self.normalize_0_360(robot_angle_deg)
+                # Для одного кута залишаємо найновішу точку.
+                # Якщо прилетіло кілька майже одночасно — беремо ближчу.
+                old_age = now - self.update_time[idx] if self.update_time[idx] > 0.0 else 999.0
 
-                idx = self.angle_to_bin(robot_angle_deg)
-
-                # Якщо у цей bin прилетіло кілька точок — беремо ближчу.
-                old_range = self.ranges[idx]
-                if math.isinf(old_range) or distance_m < old_range:
+                if old_age > 0.05:
                     self.ranges[idx] = distance_m
                     self.intensities[idx] = float(confidence)
-                    self.last_update_time[idx] = now
+                    self.update_time[idx] = now
+                else:
+                    if distance_m < self.ranges[idx]:
+                        self.ranges[idx] = distance_m
+                        self.intensities[idx] = float(confidence)
+                        self.update_time[idx] = now
 
-    # -------------------------------------------------------------------------
-    # Zone processing
-    # -------------------------------------------------------------------------
+    def get_snapshot(self):
+        now = time.time()
 
-    def get_zone_min_distance(self, ranges_snapshot, zone_min_deg, zone_max_deg):
+        with self.lock:
+            ranges = list(self.ranges)
+            intensities = list(self.intensities)
+            times = list(self.update_time)
+
+        for i in range(self.bin_count):
+            if times[i] <= 0.0:
+                ranges[i] = math.inf
+                intensities[i] = 0.0
+            elif now - times[i] > self.point_max_age_sec:
+                ranges[i] = math.inf
+                intensities[i] = 0.0
+
+        return ranges, intensities
+
+    def compute_front_distance(self, ranges):
         values = []
 
-        for idx, distance in enumerate(ranges_snapshot):
-            if math.isinf(distance) or math.isnan(distance):
+        for idx, dist in enumerate(ranges):
+            if math.isinf(dist) or math.isnan(dist):
                 continue
 
             angle_0_360 = idx * self.angle_resolution_deg
-            angle_robot = self.normalize_minus_180_180(angle_0_360)
+            angle_robot = self.normalize_180(angle_0_360)
 
-            if self.angle_in_zone(angle_robot, zone_min_deg, zone_max_deg):
-                values.append(distance)
+            if self.angle_in_front(angle_robot):
+                values.append(dist)
 
-        if not values:
-            return math.inf
-
-        return min(values)
-
-    def compute_zones(self, ranges_snapshot):
-        front_min = float(self.get_parameter('front_min_deg').value)
-        front_max = float(self.get_parameter('front_max_deg').value)
-
-        fl_min = float(self.get_parameter('front_left_min_deg').value)
-        fl_max = float(self.get_parameter('front_left_max_deg').value)
-
-        fr_min = float(self.get_parameter('front_right_min_deg').value)
-        fr_max = float(self.get_parameter('front_right_max_deg').value)
-
-        left_min = float(self.get_parameter('left_min_deg').value)
-        left_max = float(self.get_parameter('left_max_deg').value)
-
-        right_min = float(self.get_parameter('right_min_deg').value)
-        right_max = float(self.get_parameter('right_max_deg').value)
-
-        rear_min = float(self.get_parameter('rear_min_deg').value)
-        rear_max = float(self.get_parameter('rear_max_deg').value)
-
-        front = self.get_zone_min_distance(ranges_snapshot, front_min, front_max)
-        front_left = self.get_zone_min_distance(ranges_snapshot, fl_min, fl_max)
-        front_right = self.get_zone_min_distance(ranges_snapshot, fr_min, fr_max)
-        left = self.get_zone_min_distance(ranges_snapshot, left_min, left_max)
-        right = self.get_zone_min_distance(ranges_snapshot, right_min, right_max)
-        rear = self.get_zone_min_distance(ranges_snapshot, rear_min, rear_max)
-
-        return [front, front_left, front_right, left, right, rear]
-
-    # -------------------------------------------------------------------------
-    # Publishing
-    # -------------------------------------------------------------------------
-
-    def publish_scan_and_zones(self):
-        now_ros = self.get_clock().now().to_msg()
-        now_sec = time.time()
-
-        with self.data_lock:
-            ranges_snapshot = list(self.ranges)
-            intensities_snapshot = list(self.intensities)
-            update_snapshot = list(self.last_update_time)
-
-            # Старі точки прибираємо, щоб робот не бачив “привиди”.
-            max_age_sec = 0.5
-            for i in range(self.bin_count):
-                if update_snapshot[i] <= 0.0:
-                    ranges_snapshot[i] = math.inf
-                    intensities_snapshot[i] = 0.0
-                elif now_sec - update_snapshot[i] > max_age_sec:
-                    ranges_snapshot[i] = math.inf
-                    intensities_snapshot[i] = 0.0
-
-            # Очищаємо головний буфер після публікації.
-            # Так кожен LaserScan буде актуальним, а не накопиченим.
-            self.ranges = [math.inf] * self.bin_count
-            self.intensities = [0.0] * self.bin_count
-            self.last_update_time = [0.0] * self.bin_count
-
-        scan_msg = LaserScan()
-        scan_msg.header.stamp = now_ros
-        scan_msg.header.frame_id = self.frame_id
-
-        scan_msg.angle_min = 0.0
-        scan_msg.angle_max = 2.0 * math.pi
-        scan_msg.angle_increment = math.radians(self.angle_resolution_deg)
-
-        scan_msg.time_increment = 0.0
-        scan_msg.scan_time = 1.0 / max(self.publish_rate_hz, 1.0)
-
-        scan_msg.range_min = self.range_min_m
-        scan_msg.range_max = self.range_max_m
-
-        scan_msg.ranges = ranges_snapshot
-        scan_msg.intensities = intensities_snapshot
-
-        self.scan_pub.publish(scan_msg)
-
-        zones = self.compute_zones(ranges_snapshot)
-
-        zones_msg = Float32MultiArray()
-        zones_msg.data = [
-            float(x) if not math.isinf(x) else -1.0
-            for x in zones
-        ]
-        self.zones_pub.publish(zones_msg)
-
-        blocked_msg = Int32MultiArray()
-        blocked_msg.data = [
-            1 if zone_distance != math.inf and zone_distance <= self.stop_distance_m else 0
-            for zone_distance in zones
-        ]
-        self.blocked_pub.publish(blocked_msg)
-
-        self.log_zones_throttled(zones, blocked_msg.data)
-
-    def log_zones_throttled(self, zones, blocked):
         now = time.time()
 
-        if not hasattr(self, '_last_zone_log'):
-            self._last_zone_log = 0.0
+        if len(values) >= self.front_min_points:
+            values.sort()
 
-        if now - self._last_zone_log < 1.0:
+            # Беремо найближчу валідну точку в передній зоні.
+            instant_front = values[0]
+
+            self.front_history.append(instant_front)
+
+            if len(self.front_history) > self.front_filter_window:
+                self.front_history.pop(0)
+
+            # Для safety краще брати мінімум з короткої історії,
+            # щоб не пропустити перешкоду між обертами лідара.
+            filtered_front = min(self.front_history)
+
+            self.last_valid_front_distance = filtered_front
+            self.last_valid_front_time = now
+
+            return filtered_front, len(values)
+
+        # Якщо прямо зараз точок нема, але нещодавно були —
+        # не публікуємо -1.0 одразу.
+        if self.last_valid_front_time > 0.0:
+            age = now - self.last_valid_front_time
+
+            if age <= self.front_hold_sec:
+                return self.last_valid_front_distance, 0
+
+            return -1.0, 0
+
+        return -1.0, 0
+
+    def compute_closest(self, ranges):
+        best_dist = math.inf
+        best_angle = None
+
+        for idx, dist in enumerate(ranges):
+            if math.isinf(dist) or math.isnan(dist):
+                continue
+
+            if dist < best_dist:
+                best_dist = dist
+                angle_0_360 = idx * self.angle_resolution_deg
+                best_angle = self.normalize_180(angle_0_360)
+
+        if best_angle is None:
+            return -1.0, 999.0
+
+        return best_dist, best_angle
+
+    def publish_data(self):
+        ranges, intensities = self.get_snapshot()
+
+        stamp = self.get_clock().now().to_msg()
+
+        scan = LaserScan()
+        scan.header.stamp = stamp
+        scan.header.frame_id = self.frame_id
+
+        scan.angle_min = 0.0
+        scan.angle_max = 2.0 * math.pi
+        scan.angle_increment = math.radians(self.angle_resolution_deg)
+
+        scan.time_increment = 0.0
+        scan.scan_time = 1.0 / max(self.publish_rate_hz, 1.0)
+
+        scan.range_min = self.range_min_m
+        scan.range_max = self.range_max_m
+
+        scan.ranges = ranges
+        scan.intensities = intensities
+
+        self.scan_pub.publish(scan)
+
+        front_distance, front_points = self.compute_front_distance(ranges)
+        closest_distance, closest_angle = self.compute_closest(ranges)
+
+        front_msg = Float32()
+        front_msg.data = float(front_distance)
+        self.front_pub.publish(front_msg)
+
+        closest_msg = Float32MultiArray()
+        closest_msg.data = [float(closest_distance), float(closest_angle)]
+        self.closest_pub.publish(closest_msg)
+
+        self.log_debug(front_distance, front_points, closest_distance, closest_angle)
+
+    def log_debug(self, front_distance, front_points, closest_distance, closest_angle):
+        now = time.time()
+
+        if not hasattr(self, '_last_log'):
+            self._last_log = 0.0
+
+        if now - self._last_log < 0.5:
             return
 
-        self._last_zone_log = now
+        self._last_log = now
 
-        def fmt(x):
-            if math.isinf(x):
-                return '---'
-            return f'{x:.3f}'
-
-        self.get_logger().info(
-            'zones m: '
-            f'front={fmt(zones[0])}, '
-            f'front_left={fmt(zones[1])}, '
-            f'front_right={fmt(zones[2])}, '
-            f'left={fmt(zones[3])}, '
-            f'right={fmt(zones[4])}, '
-            f'rear={fmt(zones[5])} | '
-            f'blocked={blocked}'
-        )
-
-    # -------------------------------------------------------------------------
+        ###self.get_logger().info(
+        ###    f'front={front_distance:.3f} m, points={front_points} | '
+        ###    f'closest={closest_distance:.3f} m @ {closest_angle:.1f} deg'
+       ###)
 
     def destroy_node(self):
         self.running = False
@@ -515,7 +450,6 @@ class LD06Node(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-
     node = LD06Node()
 
     try:
