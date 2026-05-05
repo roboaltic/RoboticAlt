@@ -5,7 +5,6 @@ from launch_ros.actions import Node
 def generate_launch_description():
     return LaunchDescription([
 
-        # ---------------- LD06 LIDAR ----------------
         Node(
             package='robot_bringup',
             executable='ld06_node',
@@ -15,78 +14,81 @@ def generate_launch_description():
             parameters=[{
                 'port': '/dev/ttyUSB0',
                 'baudrate': 230400,
+                'frame_id': 'laser_frame',
+
+                'scan_topic': '/scan',
+                'front_distance_topic': '/lidar/front_distance',
+                'closest_topic': '/lidar/closest',
+
+                'publish_rate_hz': 40.0,
+
+                'range_min_m': 0.05,
+                'range_max_m': 12.0,
+
+                # Для діагностики постав 0.
+                # Коли все буде стабільно, можна 5.
+                'min_confidence': 0,
+
+                'angle_resolution_deg': 1.0,
+
+                # Калібрується після запуску.
+                'angle_offset_deg': 0.0,
+                'invert_angle_direction': False,
+
+                # Передній сектор.
+                'front_min_deg': -45.0,
+                'front_max_deg': 45.0,
+
+                'point_max_age_sec': 0.35,
+                'front_min_points': 1,
+                'front_hold_sec': 0.8,
+                'front_filter_window': 3,
             }]
         ),
 
-        # ---------------- KEYBOARD TELEOP ----------------
-        Node(
-            package='diff_drive_l298n',
-            executable='keyboard_teleop_node',
-            name='keyboard_teleop_node',
-            output='screen',
-            emulate_tty=True,
-            parameters=[{
-                'cmd_vel_topic': '/cmd_vel_raw',
-                'linear_speed': 0.50,
-                'angular_speed': 1.7,
-            }]
-        ),
-
-        # ---------------- LIDAR OBSTACLE AVOIDANCE ----------------
         Node(
             package='robot_bringup',
-            executable='lidar_obstacle_node',
-            name='lidar_obstacle_node',
+            executable='lidar_safety',
+            name='lidar_safety',
             output='screen',
             emulate_tty=True,
             parameters=[{
-                'scan_topic': '/scan',
-                'cmd_vel_topic': '/cmd_vel_raw',
-
-                # False — щоб авто-нода не заважала клавіатурі
-                'auto_start': False,
-
-                'forward_speed': 0.5,
-                
-
-                'turn_speed': 1.7,
-                'wall_follow_speed': 0.09,
-
-                'obstacle_dist': 0.55,
-                'clear_dist': 0.85,
-                'side_desired_dist': 0.30,
-                'side_open_dist': 0.85,
-
-                'wall_kp': 1.4,
-                'return_gain': 1.0,
-
-                'control_period': 0.05,
-                'exit_confirm_cycles': 8,
-            }]
-        ),
-
-        # ---------------- SAFETY FILTER ----------------
-        Node(
-            package='robot_bringup',
-            executable='lidar_safety_node',
-            name='lidar_safety_node',
-            output='screen',
-            emulate_tty=True,
-            parameters=[{
-                'scan_topic': '/scan',
                 'input_cmd_topic': '/cmd_vel_raw',
                 'output_cmd_topic': '/cmd_vel',
-                'stop_dist': 0.15,
-                'front_angle_deg': 35.0,
+                'front_distance_topic': '/lidar/front_distance',
+
+                'cmd_timeout_sec': 0.5,
+                'lidar_timeout_sec': 0.7,
+
+                # Зупинка.
+                'stop_distance_m': 0.45,
+                'clear_distance_m': 0.50,
+
+                'allow_rotation_when_blocked': True,
+                'allow_reverse_when_blocked': True,
+
+                'max_linear_x': 0.35,
+                'max_angular_z': 1.5,
+
+                'enable_slowdown': False,
+                'slowdown_distance_m': 0.80,
+                'min_slowdown_factor': 0.25,
+
+                'invalid_front_timeout_sec': 0.6,
             }]
         ),
 
-        # ---------------- MOTORS ----------------
         Node(
             package='diff_drive_l298n',
             executable='diff_drive_node',
-            name='diff_drive_node',
+            name='motor_node',
             output='screen',
-            emulate_tty=True
+            emulate_tty=True,
+            parameters=[{
+                # Перевір, щоб твоя motor_node реально мала такий параметр.
+                # Якщо ні — у motor_node треба підписку зробити на /cmd_vel.
+                'cmd_vel_topic': '/cmd_vel',
+            }]
         ),
+
     ])
