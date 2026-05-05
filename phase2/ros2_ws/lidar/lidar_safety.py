@@ -38,11 +38,11 @@ class LidarSafety(Node):
         self.declare_parameter('lidar_timeout_sec', 0.7)
 
         # На якій дистанції зупиняти рух вперед.
-        self.declare_parameter('stop_distance_m', 0.45)
+        self.declare_parameter('stop_distance_m', 0.22)
 
         # На якій дистанції знову дозволити рух вперед.
         # Має бути трохи більше stop_distance_m, щоб робот не смикався.
-        self.declare_parameter('clear_distance_m', 0.52)
+        self.declare_parameter('clear_distance_m', 0.30)
 
         # Якщо True — коли спереду перешкода, можна крутитися на місці.
         self.declare_parameter('allow_rotation_when_blocked', True)
@@ -236,7 +236,7 @@ class LidarSafety(Node):
         moving_forward = cmd.linear.x > 0.0
         moving_backward = cmd.linear.x < 0.0
 
-        safety_active = False
+        safety_active = True
         reason = 'OK'
 
         if self.front_blocked and moving_forward:
